@@ -627,10 +627,11 @@ class BinanceClient:
 
         while True:
             try:
-                # 换成 miniTicker，1秒推送一次，解决测试网交易稀疏无数据导致 60s 超时断线的问题
-                tradeSocket = self._socketManager.symbol_miniticker_socket(symbol=symbol)
+                # 换成 实时 ticker 流，250ms 推送一次，保持极高频的 TCP 活跃度，
+                # 防止代理、NAT 设备或 Cloud Run 负载均衡器因为“10秒内无数据包”而掐断连接
+                tradeSocket = self._socketManager.symbol_ticker_socket(symbol=symbol)
                 async with tradeSocket as stream:
-                    logger.info("🟢 %s 实时行情 WebSocket 连接成功 (miniTicker)", self._settings.tradingSymbol)
+                    logger.info("🟢 %s 实时行情 WebSocket 连接成功 (ticker)", self._settings.tradingSymbol)
                     while True:
                         try:
                             # 增加 10 秒读取超时。因为 miniTicker 每秒推送一次，如果 10 秒没收到数据，
@@ -644,10 +645,10 @@ class BinanceClient:
                                 logger.error("WebSocket 错误: %s", msg)
                                 continue
 
-                            # miniTicker 解析价格: "c" 是 close price
+                            # ticker 解析价格: "c" 是 current close price
                             if "c" in msg:
                                 price = Decimal(msg["c"])
-                                # logger.debug(f"DEBUG: Received miniTicker data, price: {price}")
+                                # logger.debug(f"DEBUG: Received ticker data, price: {price}")
                                 await onPrice(price)
 
                         except asyncio.TimeoutError:
