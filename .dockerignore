@@ -1,0 +1,41 @@
+# 环境变量不打包进镜像，通过外部挂载或传入
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 日志与状态
+logs/
+*.log
+state/
+*.state.json
+debug.txt
+*.txt
+!requirements.txt
+
+# IDE 与系统文件
+.vscode/
+.idea/
+.git/
+.gitignore
+.dockerignore
+.DS_Store
+Thumbs.db
+
+# 脚本（在容器内直接通过 python 运行主入口）
+run.bat
+backtest.bat
+cleanup.py
+run.sh

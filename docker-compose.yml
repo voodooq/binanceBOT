@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  binance-bot:
+    build: .
+    image: binance-bot:v3
+    container_name: grid_bot
+    restart: always # 机器重启后自动重启机器人
+    env_file:
+      - .env # 自动将宿主机的 .env 文件注入到容器中
+    volumes:
+      - ./state:/app/state # 挂载状态文件，防止重启丢失网格进度
+      - ./logs:/app/logs # 挂载日志文件，方便在宿主机直接查看
+    # 如果想在启动前自动清理挂单，可以将下面这行取消注释：
+    # command: sh -c "python cleanup.py && python main.py"
