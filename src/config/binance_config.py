@@ -166,12 +166,11 @@ def loadSettings(envPath: str | None = None) -> Settings:
     dotenvPath = envPath or str(PROJECT_ROOT / ".env")
 
     if not Path(dotenvPath).exists():
-        raise FileNotFoundError(
-            f".env 文件不存在: {dotenvPath}\n"
-            "请复制 .env.example 为 .env 并填入真实的 API 密钥"
+        logger.info(
+            f"ℹ️ 未找到本地 {dotenvPath} 文件。假设运行在容器/Serverless环境，将直接从系统读取环境变量。"
         )
-
-    load_dotenv(dotenvPath, override=True)
+    else:
+        load_dotenv(dotenvPath, override=True)
 
     settings = Settings(
         apiKey=os.getenv("BINANCE_API_KEY", ""),

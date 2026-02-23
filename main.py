@@ -19,6 +19,21 @@ from src.strategies.grid_strategy import GridStrategy
 logger = logging.getLogger(__name__)
 
 
+async def startHealthCheckServer(port: int):
+    """启动轻量级健康检查服务，专为 Cloud Run/Serverless 探针设计"""
+    from aiohttp import web
+    app = web.Application()
+    app.router.add_get("/", lambda r: web.Response(text="OK"))
+    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("🟢 HTTP 健康检查探针已启动，监听端口: %d", port)
+    return runner
+
+
 async def main() -> None:
     """主函数：初始化 → 连接 → 启动策略 → WebSocket 监听"""
 
@@ -45,6 +60,19 @@ async def main() -> None:
     # 校验配置
     settings.validate()
     settings.logSummary()
+
+    # ============================================
+    # 2.5 启动 Serverless 健康检查探针 (如果有 PORT 环境变量)
+    # ============================================
+    import os
+    port_str = os.getenv("PORT")
+    hc_runner = None
+    if port_str:
+        try:
+            port = int(port_str)
+            hc_runner = await startHealthCheckServer(port)
+        except Exception as e:
+            logger.error("启动健康检查探针失败: %s", e)
 
     # ============================================
     # 3. 初始化核心组件
@@ -134,6 +162,12 @@ async def main() -> None:
                 pass
 
         await _cleanup(client, notifier, strategy)
+
+        if hc_runner:
+            try:
+                await hc_runner.cleanup()
+            except Exception as e:
+                logger.error("健康探针关闭失败: %s", e)
 
         logger.info("👋 机器人已安全退出")
 
