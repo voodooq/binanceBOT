@@ -366,6 +366,9 @@ class GridStrategy:
             # 补足最低金额，并额外加上 1% 缓冲防止因为价格在挂单瞬间微跌导致四舍五入后又不够了
             safeNotional = minNotional * Decimal("1.01")
             quantity = safeNotional / price
+            
+        # 截断到交易所允许的精度
+        quantity = Decimal(self._client.formatQuantity(quantity))
 
         # --- ⏳ 交易冷却拦截器 ---
         currentTime = time.time()
@@ -436,7 +439,7 @@ class GridStrategy:
         # --- 取消/过期/拒绝：清理本地状态 ---
         if status in ("CANCELED", "EXPIRED", "REJECTED"):
             logger.info(
-                "\ud83d\uddd1\ufe0f \u8ba2\u5355\u5df2%s: \u7f51\u683c %d, orderId=%s",
+                "🗑️ 订单已终结 (%s): 网格 %d, orderId=%s",
                 status, matchedGrid.gridIndex, orderId,
             )
             matchedGrid.status = OrderStatus.CANCELLED
@@ -540,6 +543,9 @@ class GridStrategy:
                 logger.debug("⚠️ 卖单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * sellPrice), float(minNotional))
                 safeNotional = minNotional * Decimal("1.01")
                 quantity = safeNotional / sellPrice
+                
+            # 截断到交易所允许的精度
+            quantity = Decimal(self._client.formatQuantity(quantity))
 
             order = await self._client.createLimitOrder(
                 side="SELL",
