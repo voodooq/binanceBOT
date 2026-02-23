@@ -1,0 +1,38 @@
+# 环境变量 — 绝对不可提交
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 日志文件
+logs/
+*.log
+
+# 策略状态持久化文件
+state/
+*.state.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试结果与调试输出
+*.txt
+!requirements.txt
