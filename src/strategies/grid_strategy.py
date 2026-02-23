@@ -357,6 +357,16 @@ class GridStrategy:
 
         quantity = baseInvestment / price
 
+        # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
+        # 币安要求单笔订单金额必须大于 minNotional (通常测试网是 5或10，主网是 10或5)
+        # 如果计算出的投资额不够，强制上调 quantity 凑够最低消费限制，防止 -1013 错误
+        minNotional = self._client._minNotional
+        if (quantity * price) < minNotional:
+            logger.debug("⚠️ 买单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * price), float(minNotional))
+            # 补足最低金额，并额外加上 1% 缓冲防止因为价格在挂单瞬间微跌导致四舍五入后又不够了
+            safeNotional = minNotional * Decimal("1.01")
+            quantity = safeNotional / price
+
         # --- ⏳ 交易冷却拦截器 ---
         currentTime = time.time()
         if currentTime - self._lastTradeTime < self._cooldownSeconds:
@@ -522,6 +532,14 @@ class GridStrategy:
             timeToWait = self._cooldownSeconds - (currentTime - self._lastTradeTime)
             if timeToWait > 0:
                 await asyncio.sleep(timeToWait)
+
+            # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
+            # 卖单同样需要遵守币安的最小交易额度规则
+            minNotional = self._client._minNotional
+            if (quantity * sellPrice) < minNotional:
+                logger.debug("⚠️ 卖单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * sellPrice), float(minNotional))
+                safeNotional = minNotional * Decimal("1.01")
+                quantity = safeNotional / sellPrice
 
             order = await self._client.createLimitOrder(
                 side="SELL",
