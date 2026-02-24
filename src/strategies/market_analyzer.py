@@ -189,7 +189,7 @@ class MarketAnalyzer:
         currentPrice = bigCloses[-1]
 
         # v2.2: 宏观雷达 EMA200
-        emaPeriod = self._settings.trendEmaPeriod if self._settings else self.EMA_MACRO_PERIOD
+        emaPeriod = getattr(self._settings, "trendEmaPeriod", self.EMA_MACRO_PERIOD) if self._settings else self.EMA_MACRO_PERIOD
         emaMacro = self._calcEMA(bigCloses, emaPeriod)
         isMacroBullish = currentPrice > emaMacro
 

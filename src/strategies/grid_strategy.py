@@ -48,6 +48,7 @@ class GridSettingsProxy:
     staleDataTimeout: float = 300.0
     maxDrawdown: Decimal = Decimal("0.2") # 最大回撤阈值
     decayMinMultiplier: Decimal = Decimal("0.2")
+    trendEmaPeriod: int = 200 # 自适应模式下，分析系统用到此项判断牛熊
 
 
 class GridSide(str, Enum):
