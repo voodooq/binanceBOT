@@ -36,10 +36,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # 2. 初始化 PostgreSQL 数据目录并配置凭据
 USER postgres
 RUN /etc/init.d/postgresql start \
-    && psql --command "CREATE USER postgres WITH SUPERUSER PASSWORD 'postgres';" \
+    && psql --command "ALTER USER postgres WITH PASSWORD 'postgres';" \
     && createdb -O postgres binancebot \
     && /etc/init.d/postgresql stop
-# 允许本地密码连接
+# 允许本地密码直接网络连接
 RUN echo "host all  all    0.0.0.0/0  md5" >> /etc/postgresql/15/main/pg_hba.conf \
     && echo "listen_addresses='*'" >> /etc/postgresql/15/main/postgresql.conf
 
