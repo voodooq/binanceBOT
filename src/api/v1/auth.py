@@ -14,7 +14,7 @@ from src.services.crypto_service import crypto_service
 from src.core.security import create_access_token
 from src.api.dependencies import SessionDep, get_current_user
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter()
 
 @router.post("/register", response_model=UserResponse)
 async def register(user_in: UserCreate, db: SessionDep):
