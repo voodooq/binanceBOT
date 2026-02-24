@@ -7,7 +7,8 @@ from sqlalchemy import select
 from src.db.session import get_db
 from src.api.dependencies import get_current_user
 from src.models.user import User
-from src.models.bot import BotConfig, BotStatus, Trade
+from src.models.bot import BotConfig, BotStatus
+from src.models.trade import Trade
 from src.schemas.bot import BotConfigCreate, BotConfigUpdate, BotConfigResponse, TradeResponse
 from src.engine.strategy_manager import strategy_manager
 from src.services.crypto_service import crypto_service
@@ -195,5 +196,23 @@ async def list_bot_trades(
         .limit(limit)
     )
     result_trades = await db.execute(query_trades)
-    return result_trades.scalars().all()
+    
+    trades_resp = []
+    for t in result_trades.scalars().all():
+        trades_resp.append({
+            "id": t.id,
+            "bot_id": t.bot_config_id,
+            "exchange_order_id": t.exchange_order_id or "local",
+            "symbol": t.symbol,
+            "side": t.side.value if hasattr(t.side, "value") else str(t.side),
+            "status": t.status.value if hasattr(t.status, "value") else str(t.status),
+            "price": t.price,
+            "qty": t.quantity,
+            "quote_qty": t.price * t.quantity,
+            "commission": t.fee,
+            "commission_asset": t.fee_asset,
+            "realized_profit": 0.0, # 待后续引擎接入单笔利润计算
+            "created_at": t.created_at
+        })
+    return trades_resp
 
