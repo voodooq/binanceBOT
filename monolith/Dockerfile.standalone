@@ -55,7 +55,7 @@ RUN mkdir -p /app/state /app/logs
 
 # 4. 拷贝前端静态产物并配置 Nginx
 COPY --from=frontend-builder /build/dist /var/www/html
-COPY frontend/nginx.conf /etc/nginx/sites-available/default
+COPY monolith/nginx.conf /etc/nginx/sites-available/default
 RUN rm -rf /etc/nginx/sites-enabled/default && \
     ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
 
