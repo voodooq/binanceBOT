@@ -34,17 +34,16 @@ if [ ! -s "/var/lib/postgresql/15/main/PG_VERSION" ]; then
     # 初始化后把我们之前准备好的配置文件写进去
     echo "host all  all    0.0.0.0/0  md5" >> /var/lib/postgresql/15/main/pg_hba.conf
     echo "listen_addresses='*'" >> /var/lib/postgresql/15/main/postgresql.conf
-    # 把之前自动创建的密码补上
-    /etc/init.d/postgresql start
-    sleep 3
-    su - postgres -c "psql --command \"ALTER USER postgres WITH PASSWORD 'postgres';\""
-    su - postgres -c "createdb -O postgres binancebot || true"
-    /etc/init.d/postgresql stop
 fi
 
 # 1. 启动必须的基础服务
 /etc/init.d/redis-server start
 /etc/init.d/postgresql start
+
+# 确保数据库内部密码与环境变量同步 (这一步必须在数据库启动后、迁移执行前)
+echo "Synchronizing database password..."
+su - postgres -c "psql --command \"ALTER USER postgres WITH PASSWORD '${POSTGRES_PASSWORD}';\""
+su - postgres -c "createdb -O postgres binancebot || true"
 
 # 给数据库一点时间准备就绪
 sleep 3
