@@ -58,7 +58,7 @@ export default function BotList() {
         const botToDelete = bots.find(b => b.id === id);
         if (!botToDelete) return;
 
-        if (botToDelete.status === "RUNNING") {
+        if (String(botToDelete.status).toUpperCase() === "RUNNING") {
             if (window.confirm(`[${botToDelete.name}] 正在运行中，您确定要强制停止并彻底删除它吗？`)) {
                 try {
                     await api.post(`/bots/${id}/stop`);

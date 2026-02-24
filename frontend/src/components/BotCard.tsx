@@ -19,8 +19,9 @@ interface BotCardProps {
 }
 
 export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails }: BotCardProps) {
-    const isRunning = bot.status === "RUNNING";
-    const isError = bot.status === "ERROR";
+    const botStatus = String(bot.status).toUpperCase();
+    const isRunning = botStatus === "RUNNING";
+    const isError = botStatus === "ERROR";
 
     return (
         <div className="p-6 rounded-2xl bg-card border border-border shadow-sm hover:shadow-md transition-shadow group">
