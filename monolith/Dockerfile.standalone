@@ -14,15 +14,23 @@ RUN npm run build
 # ==========================================
 FROM python:3.11-slim
 
-# 1. 安装系统依赖: Nginx, Supervisor, PostgreSQL 15, Redis, 编译工具
+# 1. 安装系统依赖: Nginx, Supervisor, Redis 和 编译工具
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     nginx \
     supervisor \
     redis-server \
-    postgresql-15 \
-    postgresql-contrib-15 \
+    curl \
+    gnupg2 \
+    ca-certificates \
+    lsb-release \
+    # 以符合 Debian 12/13 新规范的方法添加 PostgreSQL 官方仓库
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-15 postgresql-contrib-15 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. 初始化 PostgreSQL 数据目录并配置凭据
