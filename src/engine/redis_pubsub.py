@@ -5,7 +5,7 @@ from typing import Callable, Coroutine
 
 from redis.asyncio.client import PubSub
 
-from src.db.session import get_redis
+from src.db.session import redis_client
 from src.engine.strategy_manager import strategy_manager
 from src.engine.ws_hub import ws_hub
 
@@ -23,10 +23,10 @@ class RedisEventBus:
 
     async def start(self):
         """连入 Redis 并挂载订阅"""
-        redis = await get_redis()
-        self._pubsub = redis.pubsub()
+        # NOTE: 直接使用模块级单例，而非 FastAPI 依赖注入专用的 get_redis() 生成器
+        self._pubsub = redis_client.pubsub()
         await self._pubsub.subscribe(self.KILL_SWITCH_CHANNEL)
-        logger.info(f"🛡️ [RedisEventBus] 已订阅 '{self.KILL_SWITCH_CHANNEL}' 紧急广播频道")
+        logger.info(f"[RedisEventBus] Subscribed to '{self.KILL_SWITCH_CHANNEL}'")
         
         # 启动后台守护任务循环读消息
         self._listener_task = asyncio.create_task(self._listen_loop())
@@ -37,18 +37,19 @@ class RedisEventBus:
         if self._pubsub:
             await self._pubsub.unsubscribe()
             await self._pubsub.close()
-        logger.info("🛡️ [RedisEventBus] 已安全停止对广播频道的订阅")
+        logger.info("[RedisEventBus] Stopped")
 
     async def publish_kill_switch(self, reason: str, triggered_by: int):
         """主动触发全局交易挂起"""
-        redis = await get_redis()
+        # NOTE: 直接使用模块级单例
         payload = json.dumps({
             "action": "HALT_ALL",
             "reason": reason,
             "triggered_by": triggered_by
         })
-        await redis.publish(self.KILL_SWITCH_CHANNEL, payload)
-        logger.warning(f"🚨 [RedisEventBus] 发送全局熔断指令! 原因: {reason}")
+        await redis_client.publish(self.KILL_SWITCH_CHANNEL, payload)
+        logger.warning(f"[RedisEventBus] Kill switch triggered! Reason: {reason}")
+
         
     async def _listen_loop(self):
         try:
