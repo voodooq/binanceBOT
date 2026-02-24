@@ -26,7 +26,7 @@ from src.utils.error_handler import (
 logger = logging.getLogger(__name__)
 
 # NOTE: WebSocket 余额推送超过此时间未更新，视为断线，回退 REST
-BALANCE_STALE_TIMEOUT = 60
+BALANCE_STALE_TIMEOUT = 3600
 
 
 def _toBinanceApiError(e: BinanceAPIException) -> ApiError:
@@ -253,8 +253,8 @@ class BinanceClient:
         if self._lastBalanceUpdate > 0:
             staleness = time.time() - self._lastBalanceUpdate
             if staleness > BALANCE_STALE_TIMEOUT:
-                logger.warning(
-                    "\u26a0\ufe0f 余额快照已过期 (%.0f秒未更新)，回退 REST 同步",
+                logger.info(
+                    "🔄 余额快照长时间未变更 (%.0f秒)，执行一次 REST 同步确保数据一致性",
                     staleness,
                 )
                 await self._syncBalances()
