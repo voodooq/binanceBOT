@@ -13,6 +13,7 @@ from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Dict, Optional, Any
 
 from src.exchanges.binance_client import BinanceClient
 from src.utils.notifier import Notifier
