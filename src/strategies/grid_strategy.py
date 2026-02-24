@@ -46,6 +46,7 @@ class GridSettingsProxy:
     tradingSymbol: str # 用来兼容日志
     tradeCooldown: float = 5.0
     staleDataTimeout: float = 300.0
+    maxDrawdown: Decimal = Decimal("0.2") # 最大回撤阈值
     decayMinMultiplier: Decimal = Decimal("0.2")
 
 
@@ -146,6 +147,7 @@ class GridStrategy(BaseStrategy):
             tradingSymbol=bot_config.symbol,
             tradeCooldown=float(p.get("trade_cooldown", 5.0)),
             staleDataTimeout=float(p.get("stale_data_timeout", 300.0)),
+            maxDrawdown=Decimal(str(p.get("max_drawdown", "0.2"))),
         )
 
         from src.utils.notifier import Notifier # 临时提供 None，或者你可以从某个上下文获取

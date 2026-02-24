@@ -61,12 +61,12 @@ export default function BotDetail() {
 
                 <div className="flex items-center gap-3">
                     <div className="px-4 py-2 bg-card border border-border rounded-xl">
-                        <p className="text-[10px] text-muted-foreground uppercase font-bold">运行天数</p>
-                        <p className="text-sm font-bold">12 天</p>
+                        <p className="text-[10px] text-muted-foreground uppercase font-bold">运行状态</p>
+                        <p className="text-sm font-bold">{bot.status === 'RUNNING' ? '运行中' : bot.status === 'STOPPED' ? '已停止' : '空闲'}</p>
                     </div>
                     <div className="px-4 py-2 bg-card border border-border rounded-xl">
-                        <p className="text-[10px] text-muted-foreground uppercase font-bold">成交笔数</p>
-                        <p className="text-sm font-bold">1,248</p>
+                        <p className="text-[10px] text-muted-foreground uppercase font-bold">创建时间</p>
+                        <p className="text-sm font-bold">{new Date(bot.created_at).toLocaleDateString()}</p>
                     </div>
                 </div>
             </div>
@@ -87,91 +87,93 @@ export default function BotDetail() {
                 <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32">
                     <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
                         <Zap className="w-3 h-3" />
-                        当前持仓价值
+                        总投入金额
                     </p>
                     <div className="flex items-baseline gap-2">
-                        <h2 className="text-3xl font-black uppercase">$ {parseFloat(bot.total_investment) * 0.42}</h2>
+                        <h2 className="text-3xl font-black uppercase">$ {parseFloat(bot.total_investment).toFixed(2)}</h2>
                         <span className="text-xs font-medium text-muted-foreground">USDT</span>
                     </div>
                 </div>
 
-                <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32">
-                    <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
-                        <Activity className="w-3 h-3" />
-                        ROI
-                    </p>
-                    <div className="flex items-baseline gap-2">
-                        <h2 className="text-3xl font-black text-green-500">12.4%</h2>
-                        <span className="text-xs font-medium text-muted-foreground text-green-500">↑</span>
+                {parseFloat(bot.total_investment) > 0 && parseFloat(bot.total_pnl) !== 0 ? (
+                    <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32">
+                        <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
+                            <Activity className="w-3 h-3" />
+                            ROI
+                        </p>
+                        <div className="flex items-baseline gap-2">
+                            <h2 className={cn("text-3xl font-black", parseFloat(bot.total_pnl) > 0 ? "text-green-500" : "text-red-500")}>
+                                {((parseFloat(bot.total_pnl) / parseFloat(bot.total_investment)) * 100).toFixed(2)}%
+                            </h2>
+                            <span className={cn("text-xs font-medium", parseFloat(bot.total_pnl) > 0 ? "text-green-500" : "text-red-500")}>
+                                {parseFloat(bot.total_pnl) > 0 ? "↑" : "↓"}
+                            </span>
+                        </div>
                     </div>
-                </div>
+                ) : (
+                    <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32 opacity-50">
+                        <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
+                            <Activity className="w-3 h-3" />
+                            ROI
+                        </p>
+                        <div className="flex items-baseline gap-2">
+                            <h2 className="text-3xl font-black text-muted-foreground">--</h2>
+                        </div>
+                    </div>
+                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
                 {/* 左侧详情与列表 */}
                 <div className="lg:col-span-3 space-y-8">
-                    {/* 网格分布预览图占位 */}
+                    {/* 网格参数概览 */}
                     <div className="p-6 rounded-2xl bg-card border border-border">
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="font-bold flex items-center gap-2">
                                 <LayoutGrid className="w-4 h-4 text-primary" />
-                                网格挂单分布
+                                策略参数概览
                             </h3>
-                            <div className="flex gap-2 text-[10px] font-bold">
-                                <span className="flex items-center gap-1 text-green-500"><div className="w-2 h-2 rounded-full bg-green-500" /> BUY</span>
-                                <span className="flex items-center gap-1 text-red-500"><div className="w-2 h-2 rounded-full bg-red-500" /> SELL</span>
-                            </div>
                         </div>
 
-                        <div className="space-y-2 py-4">
-                            {/* 模拟网格线 */}
-                            {[1, 2, 3, 4, 5].map(i => (
-                                <div key={i} className="flex items-center gap-4 group">
-                                    <span className="text-[10px] font-mono text-muted-foreground w-12 text-right">45,10{i}</span>
-                                    <div className={cn(
-                                        "flex-1 h-6 rounded flex items-center px-4 text-[10px] font-bold transition-all",
-                                        i < 3 ? "bg-red-500/10 text-red-500 border-l-2 border-red-500 group-hover:bg-red-500/20" :
-                                            "bg-green-500/10 text-green-500 border-l-2 border-green-500 group-hover:bg-green-500/20"
-                                    )}>
-                                        {i < 3 ? "LIMIT_SELL" : "LIMIT_BUY"} • 0.02 BTC
-                                    </div>
-                                </div>
-                            ))}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-2">
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">价格下限</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_lower_price || '--'}</span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">价格上限</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_upper_price || '--'}</span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">网格数量</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_count || '--'}</span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">单格投入</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_investment_per_grid || '--'}</span>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 py-2 border-t border-border/50">
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">止损比例</span>
+                                <span className="text-sm font-mono font-bold">{(parseFloat(bot.parameters?.stop_loss_percent || "0") * 100).toFixed(1)}%</span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">目标止盈</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.take_profit_amount || '--'} USDT</span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs text-muted-foreground uppercase font-bold">自适应模式</span>
+                                <span className="text-sm font-mono font-bold">{bot.parameters?.adaptive_mode ? 'ON' : 'OFF'}</span>
+                            </div>
                         </div>
                     </div>
 
-                    {/* 历史成交记录表 */}
-                    <div className="p-6 rounded-2xl bg-card border border-border">
-                        <h3 className="font-bold flex items-center gap-2 mb-6">
-                            <History className="w-4 h-4 text-primary" />
-                            最近成交历史
-                        </h3>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead>
-                                    <tr className="text-muted-foreground text-xs uppercase border-b border-border">
-                                        <th className="text-left pb-3 font-bold">类型</th>
-                                        <th className="text-left pb-3 font-bold">价格</th>
-                                        <th className="text-left pb-3 font-bold">数量</th>
-                                        <th className="text-right pb-3 font-bold">时间</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-border">
-                                    {[1, 2, 3].map(i => (
-                                        <tr key={i} className="group hover:bg-muted/30 transition-colors">
-                                            <td className="py-4">
-                                                <span className={i % 2 === 0 ? "text-green-500 font-bold" : "text-red-500 font-bold"}>
-                                                    {i % 2 === 0 ? "BUY" : "SELL"}
-                                                </span>
-                                            </td>
-                                            <td className="py-4 font-mono">49,231.00</td>
-                                            <td className="py-4 font-mono">0.051</td>
-                                            <td className="py-4 text-right text-muted-foreground text-xs">10:45:12</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                    {/* 成交历史占位 */}
+                    <div className="p-6 rounded-2xl bg-card border border-border flex flex-col items-center justify-center min-h-[200px]">
+                        <History className="w-8 h-8 text-muted-foreground mb-4 opacity-50" />
+                        <h3 className="font-bold text-muted-foreground">暂无可用历史明细</h3>
+                        <p className="text-xs text-muted-foreground/70 mt-2">成交记录接口暂未接入 V3 引擎</p>
                     </div>
                 </div>
 
