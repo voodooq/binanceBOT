@@ -14,6 +14,7 @@ interface Bot {
     status: BotStatus;
     total_pnl: string;
     strategy_type: string;
+    parameters?: any;
 }
 
 export default function BotList() {
@@ -123,7 +124,7 @@ export default function BotList() {
                     <p className="text-muted-foreground italic">正在拉取机器人数据...</p>
                 </div>
             ) : filteredBots.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-20">
                     {filteredBots.map((bot) => (
                         <BotCard
                             key={bot.id}
