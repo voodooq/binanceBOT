@@ -62,9 +62,13 @@ sleep 2
 echo "Ensuring a clean slate for supervisord..."
 pkill -9 postgres || true
 pkill -9 redis-server || true
+mkdir -p /var/run/postgresql /var/run/redis
+chown postgres:postgres /var/run/postgresql
+chown redis:redis /var/run/redis
 rm -rf /var/run/postgresql/*.pid /var/run/redis/*.pid || true
 rm -rf /var/lib/postgresql/15/main/postmaster.pid || true
 
 echo "Starting all services via supervisord..."
 exec /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
+
 
