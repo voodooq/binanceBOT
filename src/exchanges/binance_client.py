@@ -115,6 +115,9 @@ class BinanceClient:
         # 初始化资金快照 (首次全量从 REST 获取)
         await self._syncBalances()
 
+        # 初始化单例 SocketManager，防止多流并发创建导致竞争
+        self._socketManager = BinanceSocketManager(self._client)
+
         logger.info("✅ 币安连接成功")
 
     async def disconnect(self) -> None:
@@ -616,6 +619,15 @@ class BinanceClient:
 
         return positionValue, totalValue
 
+    async def _is_client_alive(self) -> bool:
+        """极低权重 (1) 测试连接是否依然处于 Session 激活态"""
+        if not self._client: return False
+        try:
+            await self._client.get_server_time()
+            return True
+        except Exception:
+            return False
+
     # ==================================================
     # WebSocket 流
     # ==================================================
@@ -630,48 +642,51 @@ class BinanceClient:
 
         @param onPrice 价格回调函数: async def callback(price: Decimal) -> None
         """
-        client = self._ensureConnected()
-        self._socketManager = BinanceSocketManager(client)
         symbol = self._settings.tradingSymbol.lower()
 
         logger.info("📡 启动 %s 实时行情 WebSocket ...", self._settings.tradingSymbol)
 
+        retry_count = 0
         while True:
             try:
-                # 换成 实时 ticker 流，250ms 推送一次，保持极高频的 TCP 活跃度，
-                # 防止代理、NAT 设备或 Cloud Run 负载均衡器因为“10秒内无数据包”而掐断连接
+                # 检查底层 Client 是否已断开，若断开则尝试重建
+                if not await self._is_client_alive():
+                    logger.warning("🔄 发现底层 Session 已失效，尝试全量重建连接...")
+                    await self.disconnect()
+                    await self.connect()
+                    retry_count = 0
+
                 tradeSocket = self._socketManager.symbol_ticker_socket(symbol=symbol)
                 async with tradeSocket as stream:
-                    logger.info("🟢 %s 实时行情 WebSocket 连接成功 (ticker)", self._settings.tradingSymbol)
+                    logger.info("🟢 %s 行情流已挂载", self._settings.tradingSymbol)
+                    retry_count = 0
                     while True:
                         try:
-                            # 增加 10 秒读取超时。因为 miniTicker 每秒推送一次，如果 10 秒没收到数据，
-                            # 说明代理静默丢弃了 TCP 连接（假死）。抛出 TimeoutError 并秒切重连。
+                            # 仅针对接收数据设置 10s 超时
                             msg = await asyncio.wait_for(stream.recv(), timeout=10.0)
-
-                            if msg is None:
-                                continue
+                            if msg is None: continue
 
                             if "e" in msg and msg["e"] == "error":
-                                logger.error("WebSocket 错误: %s", msg)
+                                logger.error("WebSocket 内部错误: %s", msg)
                                 continue
 
-                            # ticker 解析价格: "c" 是 current close price
                             if "c" in msg:
                                 price = Decimal(msg["c"])
-                                # logger.debug(f"DEBUG: Received ticker data, price: {price}")
-                                await onPrice(price)
+                                # NOTE: 使用 create_task 异步处理回调，防止下单逻辑延迟导致接收流超时
+                                asyncio.create_task(onPrice(price))
 
                         except asyncio.TimeoutError:
-                            logger.warning("⚠️ Trade WebSocket 10秒无数据 (静默断线?)，执行强制重连...")
-                            break  # 退出内层循环，重新建立 WebSocket 连接
+                            logger.warning("⚠️ %s 行情流 10s 无响应 (静默掉线)，尝试重连...", self._settings.tradingSymbol)
+                            break
                             
             except asyncio.CancelledError:
-                logger.info("🛑 Trade WebSocket 流已取消")
+                logger.info("🛑 %s 行情流取消", self._settings.tradingSymbol)
                 raise
             except Exception as e:
-                logger.error("Trade WebSocket 发生异常: %s (5秒后重试)", e)
-                await asyncio.sleep(5.0)
+                retry_count += 1
+                wait_time = min(30, 2 + retry_count * 2)
+                logger.error("❌ %s 行情流异常: %s (%ds 后重试)", self._settings.tradingSymbol, e, wait_time)
+                await asyncio.sleep(wait_time)
 
     async def startUserDataStream(
         self,
@@ -683,54 +698,46 @@ class BinanceClient:
 
         @param onOrderUpdate 订单更新回调: async def callback(event: dict) -> None
         """
-        client = self._ensureConnected()
-        self._socketManager = BinanceSocketManager(client)
-
         logger.info("📡 启动用户数据 WebSocket ...")
 
+        retry_count = 0
         while True:
             try:
+                # 检查底层 Client 状态
+                if not await self._is_client_alive():
+                    await self.disconnect()
+                    await self.connect()
+
                 userSocket = self._socketManager.user_socket()
                 async with userSocket as stream:
-                    logger.info("🟢 用户数据 WebSocket 连接成功")
+                    logger.info("🟢 用户数据流已挂载")
+                    retry_count = 0
                     while True:
                         try:
-                            # 用户流可能长时间无数据。但是 Binance 会定期发送 ping 帧，
-                            # 如果代理静默断开了连接，底层 socket recv 永远阻塞且不会抛出异常。
-                            # 设置 3 分钟 (180秒) 超时作为应用层 Keep-Alive。
-                            # 如果 3 分钟没有任何消息传递，强制重连。
                             msg = await asyncio.wait_for(stream.recv(), timeout=180.0)
-
-                            if msg is None:
-                                continue
+                            if msg is None: continue
 
                             eventType = msg.get("e", "")
-
                             if eventType == "executionReport":
-                                orderStatus = msg.get("X", "")
-                                if orderStatus in ("FILLED", "PARTIALLY_FILLED"):
-                                    await onOrderUpdate(msg)
-                                elif orderStatus in ("CANCELED", "EXPIRED", "REJECTED"):
-                                    logger.info(
-                                        "📥 订单状态变更: orderId=%s, status=%s",
-                                        msg.get("i"), orderStatus,
-                                    )
-                                    await onOrderUpdate(msg)
+                                # 同样异步处理，防止逻辑阻塞连接维护
+                                asyncio.create_task(onOrderUpdate(msg))
                             elif eventType == "outboundAccountPosition":
                                 for b in msg.get("B", []):
                                     asset = b["a"]
                                     free = Decimal(b["f"])
                                     self._balances[asset] = free
                                 self._lastBalanceUpdate = time.time()
-                                logger.info("💰 资金快照已更新 (WS): %s", self._getBalancesSummary())
+                                logger.info("💰 资产更新 (WS): %s", self._getBalancesSummary())
 
                         except asyncio.TimeoutError:
-                            logger.warning("⚠️ UserData WebSocket 3分钟无响应 (心跳中断?)，执行强制重连...")
-                            break  # 退出内层循环，重新建立 WebSocket 连接
+                            logger.warning("⚠️ 用户数据流 180s 无响应 (心跳中断)，强制重连...")
+                            break
 
             except asyncio.CancelledError:
-                logger.info("🛑 用户数据流已取消")
+                logger.info("🛑 用户数据流取消")
                 raise
             except Exception as e:
-                logger.error("UserData WebSocket 发生异常: %s (5秒后重试)", e)
-                await asyncio.sleep(5.0)
+                retry_count += 1
+                wait_time = min(60, 5 + retry_count * 5)
+                logger.error("❌ 用户数据流异常: %s (%ds 后重试)", e, wait_time)
+                await asyncio.sleep(wait_time)

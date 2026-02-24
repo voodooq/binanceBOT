@@ -264,8 +264,8 @@ class GridStrategy(BaseStrategy):
 
         检查价格是否穿越网格线，以及风控条件是否触发。
         """
-        logger.info(f"⚡ 收到实时价格: {price}")
-        print(f"Receive Price: {price}") # 临时测试输出，观察 WebSocket 连通性
+        logger.debug(f"⚡ 收到实时价格: {price}")
+        # print(f"Receive Price: {price}") # 注释掉干扰输出
         if not self._running:
             return
 
