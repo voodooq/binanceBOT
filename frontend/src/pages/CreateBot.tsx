@@ -47,7 +47,7 @@ export default function CreateBot() {
             grid_count: 20,
             grid_investment_per_grid: 10,
             reserve_ratio: 0.05,
-            adaptive_mode: false,
+            adaptive_mode: true,
             stop_loss_percent: 0.15,
             take_profit_amount: 100,
         }
@@ -322,7 +322,7 @@ export default function CreateBot() {
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             <div className="space-y-2">
                                 <label className="text-xs font-bold uppercase ml-1">网格密度 (格数)</label>
                                 <input
@@ -350,6 +350,17 @@ export default function CreateBot() {
                                     onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, stop_loss_percent: parseFloat(e.target.value) } })}
                                     className="w-full px-4 py-2 bg-background border border-border rounded-lg"
                                 />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-xs font-bold uppercase ml-1">自适应模式</label>
+                                <select
+                                    value={formData.parameters.adaptive_mode ? "true" : "false"}
+                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, adaptive_mode: e.target.value === "true" } })}
+                                    className="w-full px-4 py-2 bg-background border border-border rounded-lg"
+                                >
+                                    <option value="true">开启 (推荐)</option>
+                                    <option value="false">关闭</option>
+                                </select>
                             </div>
                         </div>
 
