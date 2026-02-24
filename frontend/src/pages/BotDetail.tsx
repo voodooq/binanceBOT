@@ -24,6 +24,15 @@ export default function BotDetail() {
         },
     });
 
+    const { data: trades = [], isLoading: isLoadingTrades } = useQuery({
+        queryKey: ["bot-trades", id],
+        queryFn: async () => {
+            const resp = await api.get(`/bots/${id}/trades`);
+            return resp.data;
+        },
+        refetchInterval: 15000, // 每 15 秒静默刷新一次
+    });
+
     if (isLoading) {
         return (
             <div className="flex items-center justify-center h-full py-20">
@@ -168,11 +177,74 @@ export default function BotDetail() {
                         </div>
                     </div>
 
-                    {/* 成交历史占位 */}
-                    <div className="p-6 rounded-2xl bg-card border border-border flex flex-col items-center justify-center min-h-[200px]">
-                        <History className="w-8 h-8 text-muted-foreground mb-4 opacity-50" />
-                        <h3 className="font-bold text-muted-foreground">暂无可用历史明细</h3>
-                        <p className="text-xs text-muted-foreground/70 mt-2">成交记录接口暂未接入 V3 引擎</p>
+                    {/* 成交历史 */}
+                    <div className="p-6 rounded-2xl bg-card border border-border flex flex-col min-h-[300px]">
+                        <h3 className="font-bold flex items-center gap-2 mb-6">
+                            <History className="w-4 h-4 text-primary" />
+                            近期历史明细
+                        </h3>
+
+                        {isLoadingTrades ? (
+                            <div className="flex-1 flex flex-col items-center justify-center opacity-50">
+                                <div className="w-6 h-6 border-2 border-primary/20 border-t-primary rounded-full animate-spin mb-3" />
+                                <span className="text-xs">加载明细中...</span>
+                            </div>
+                        ) : trades.length > 0 ? (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="text-xs text-muted-foreground uppercase bg-muted/50">
+                                        <tr>
+                                            <th className="px-4 py-3 rounded-l-lg">时间</th>
+                                            <th className="px-4 py-3">方向</th>
+                                            <th className="px-4 py-3">成交均价</th>
+                                            <th className="px-4 py-3">成交数量</th>
+                                            <th className="px-4 py-3 text-right rounded-r-lg">实现利润</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-border/50">
+                                        {trades.map((trade: any) => (
+                                            <tr key={trade.id} className="hover:bg-muted/20 transition-colors">
+                                                <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
+                                                    {new Date(trade.created_at).toLocaleString()}
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <span className={cn(
+                                                        "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
+                                                        trade.side === "BUY" ? "bg-green-500/10 text-green-500" : "bg-red-500/10 text-red-500"
+                                                    )}>
+                                                        {trade.side === "BUY" ? "买入" : "卖出"}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3 font-mono">
+                                                    {parseFloat(trade.price).toFixed(4)}
+                                                </td>
+                                                <td className="px-4 py-3 font-mono text-muted-foreground">
+                                                    {parseFloat(trade.qty).toString()}
+                                                </td>
+                                                <td className="px-4 py-3 text-right">
+                                                    {parseFloat(trade.realized_profit) !== 0 ? (
+                                                        <span className={cn(
+                                                            "font-mono font-bold",
+                                                            parseFloat(trade.realized_profit) > 0 ? "text-green-500" : "text-red-500"
+                                                        )}>
+                                                            {parseFloat(trade.realized_profit) > 0 ? "+" : ""}{parseFloat(trade.realized_profit).toFixed(4)} USDT
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-muted-foreground font-mono">--</span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center opacity-50 border border-dashed border-border rounded-xl bg-muted/20">
+                                <History className="w-8 h-8 mb-3 opacity-50 text-muted-foreground" />
+                                <span className="text-sm font-bold">暂无成交记录</span>
+                                <span className="text-[10px] text-muted-foreground mt-1">引擎启动或行情波动后将在此展示交易流水</span>
+                            </div>
+                        )}
                     </div>
                 </div>
 

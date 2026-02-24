@@ -7,8 +7,8 @@ from sqlalchemy import select
 from src.db.session import get_db
 from src.api.dependencies import get_current_user
 from src.models.user import User
-from src.models.bot import BotConfig, BotStatus
-from src.schemas.bot import BotConfigCreate, BotConfigUpdate, BotConfigResponse
+from src.models.bot import BotConfig, BotStatus, Trade
+from src.schemas.bot import BotConfigCreate, BotConfigUpdate, BotConfigResponse, TradeResponse
 from src.engine.strategy_manager import strategy_manager
 from src.services.crypto_service import crypto_service
 from src.models.api_key import ApiKey
@@ -170,3 +170,30 @@ async def delete_bot(
         
     await db.delete(bot)
     await db.commit()
+
+@router.get("/{bot_id}/trades", response_model=list[TradeResponse])
+async def list_bot_trades(
+    bot_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    skip: int = 0,
+    limit: int = 100,
+) -> Any:
+    """获取某个机器人关联的真实历史成交记录 (倒序排列)"""
+    # 1. 鉴权：确认机器人归属当前用户
+    query_bot = select(BotConfig).where(BotConfig.id == bot_id, BotConfig.user_id == current_user.id)
+    result_bot = await db.execute(query_bot)
+    if not result_bot.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="未找到该机器人或无权访问")
+        
+    # 2. 查询该机器人的交易记录
+    query_trades = (
+        select(Trade)
+        .where(Trade.bot_id == bot_id)
+        .order_by(Trade.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result_trades = await db.execute(query_trades)
+    return result_trades.scalars().all()
+

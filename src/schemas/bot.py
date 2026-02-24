@@ -34,3 +34,21 @@ class BotConfigResponse(BotConfigBase):
     updated_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+class TradeResponse(BaseModel):
+    id: int
+    bot_id: int
+    exchange_order_id: str
+    symbol: str
+    side: str
+    status: str
+    price: Decimal
+    qty: Decimal
+    quote_qty: Decimal
+    commission: Decimal | None
+    commission_asset: str | None
+    realized_profit: Decimal
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
