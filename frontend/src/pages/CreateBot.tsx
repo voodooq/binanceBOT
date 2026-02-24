@@ -8,8 +8,16 @@ import {
     Zap,
     Target,
     AlertTriangle,
-    Info
+    Info,
+    TrendingUp,
+    Shield,
+    Activity
 } from "lucide-react";
+
+const TOP_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT"
+];
 
 export default function CreateBot() {
     const navigate = useNavigate();
@@ -31,6 +39,7 @@ export default function CreateBot() {
         strategy_type: "GRID",
         is_testnet: true,
         total_investment: 100,
+        exchange: "Binance", // Added default to show in preview
         parameters: {
             grid_lower_price: "",
             grid_upper_price: "",
@@ -42,6 +51,72 @@ export default function CreateBot() {
             take_profit_amount: 100,
         }
     });
+
+    // 实时获取选中交易对的价格
+    const { data: marketData, isLoading: isPriceLoading } = useQuery({
+        queryKey: ["market-price", formData.symbol],
+        queryFn: async () => {
+            const resp = await api.get(`/market/price?symbol=${formData.symbol}`);
+            return resp.data;
+        },
+        staleTime: 10000, // 10秒内不重复请求
+    });
+
+    const currentPrice = marketData?.price ? parseFloat(marketData.price) : null;
+
+    // 处理 API Key 切换事件，同步推断环境
+    const handleKeyChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const id = e.target.value;
+        const selectedKey = keys.find((k: any) => k.id.toString() === id);
+        setFormData({
+            ...formData,
+            api_key_id: id,
+            is_testnet: selectedKey ? selectedKey.is_testnet : true,
+            exchange: selectedKey ? selectedKey.exchange : "Binance"
+        });
+    };
+
+    // 一键填充推荐策略
+    const applyStrategy = (type: "conservative" | "moderate" | "aggressive") => {
+        if (!currentPrice) {
+            alert("正在获取实时价格，请稍等...");
+            return;
+        }
+
+        let lowerMultiplier, upperMultiplier, gridCount, stopLoss;
+
+        switch (type) {
+            case "conservative": // 保守: 宽幅网格，低止损
+                lowerMultiplier = 0.80; // -20%
+                upperMultiplier = 1.20; // +20%
+                gridCount = 15;
+                stopLoss = 0.25;
+                break;
+            case "moderate": // 稳健: 中等网格
+                lowerMultiplier = 0.85; // -15%
+                upperMultiplier = 1.15; // +15%
+                gridCount = 25;
+                stopLoss = 0.20;
+                break;
+            case "aggressive": // 激进: 窄幅高频
+                lowerMultiplier = 0.90; // -10%
+                upperMultiplier = 1.10; // +10%
+                gridCount = 40;
+                stopLoss = 0.15;
+                break;
+        }
+
+        setFormData(prev => ({
+            ...prev,
+            parameters: {
+                ...prev.parameters,
+                grid_lower_price: (currentPrice * lowerMultiplier).toFixed(2),
+                grid_upper_price: (currentPrice * upperMultiplier).toFixed(2),
+                grid_count: gridCount,
+                stop_loss_percent: stopLoss,
+            }
+        }));
+    };
 
     const createMutation = useMutation({
         mutationFn: async (data: any) => {
@@ -106,15 +181,24 @@ export default function CreateBot() {
                                 />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">交易对 (Symbol)</label>
-                                <input
-                                    type="text"
+                                <div className="flex justify-between items-center ml-1">
+                                    <label className="text-xs font-bold uppercase">交易对 (Symbol)</label>
+                                    {isPriceLoading ? (
+                                        <span className="text-[10px] text-muted-foreground animate-pulse">获取报价中...</span>
+                                    ) : currentPrice ? (
+                                        <span className="text-[10px] font-mono text-green-500 font-bold">${currentPrice}</span>
+                                    ) : null}
+                                </div>
+                                <select
                                     required
                                     value={formData.symbol}
-                                    onChange={(e) => setFormData({ ...formData, symbol: e.target.value.toUpperCase() })}
-                                    placeholder="BTCUSDT / ETHUSDT"
-                                    className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-                                />
+                                    onChange={(e) => setFormData({ ...formData, symbol: e.target.value })}
+                                    className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all cursor-pointer font-bold"
+                                >
+                                    {TOP_SYMBOLS.map(sym => (
+                                        <option key={sym} value={sym}>{sym}</option>
+                                    ))}
+                                </select>
                             </div>
                         </div>
 
@@ -124,7 +208,7 @@ export default function CreateBot() {
                                 <select
                                     required
                                     value={formData.api_key_id}
-                                    onChange={(e) => setFormData({ ...formData, api_key_id: e.target.value })}
+                                    onChange={handleKeyChange}
                                     className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all cursor-pointer"
                                 >
                                     <option value="">选择已绑定的 Key...</option>
@@ -149,10 +233,36 @@ export default function CreateBot() {
                     </section>
 
                     <section className="p-6 rounded-2xl bg-card border border-border shadow-sm space-y-6">
-                        <h3 className="text-sm font-bold uppercase text-muted-foreground flex items-center gap-2">
-                            <Zap className="w-4 h-4" />
-                            策略深度参数 (网格策略)
-                        </h3>
+                        <div className="flex items-center justify-between mb-2">
+                            <h3 className="text-sm font-bold uppercase text-muted-foreground flex items-center gap-2">
+                                <Zap className="w-4 h-4" />
+                                策略深度参数 (网格策略)
+                            </h3>
+                            {/* 一键推荐 */}
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => applyStrategy("conservative")}
+                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 transition-colors flex items-center gap-1"
+                                >
+                                    <Shield className="w-3 h-3" /> 保守型
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => applyStrategy("moderate")}
+                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors flex items-center gap-1"
+                                >
+                                    <Activity className="w-3 h-3" /> 稳健型
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => applyStrategy("aggressive")}
+                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors flex items-center gap-1"
+                                >
+                                    <TrendingUp className="w-3 h-3" /> 激进型
+                                </button>
+                            </div>
+                        </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="space-y-2">
@@ -224,18 +334,16 @@ export default function CreateBot() {
 
                         <div className="space-y-4">
                             <div className="flex justify-between py-2 border-b border-dashed border-border text-sm">
-                                <span className="text-muted-foreground">拟用账户</span>
-                                <span className="font-medium">Binance</span>
-                            </div>
-                            <div className="flex justify-between py-2 border-b border-dashed border-border text-sm">
-                                <span className="text-muted-foreground">环境</span>
+                                <span className="text-muted-foreground">拟用账户环境</span>
                                 <span className={formData.is_testnet ? "text-amber-500 font-bold" : "text-green-500 font-bold"}>
-                                    {formData.is_testnet ? "TESTNET" : "REAL ACCOUNT"}
+                                    {formData.exchange} {formData.is_testnet ? "(TESTNET)" : "(REAL)"}
                                 </span>
                             </div>
                             <div className="flex justify-between py-2 border-b border-dashed border-border text-sm">
-                                <span className="text-muted-foreground">预估步长</span>
-                                <span className="font-medium text-primary">--</span>
+                                <span className="text-muted-foreground">基准参考价</span>
+                                <span className="font-mono font-bold text-primary">
+                                    {currentPrice ? `$${currentPrice}` : "--"}
+                                </span>
                             </div>
                         </div>
 
