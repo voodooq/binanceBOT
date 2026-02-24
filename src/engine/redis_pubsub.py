@@ -35,8 +35,12 @@ class RedisEventBus:
         if self._listener_task:
             self._listener_task.cancel()
         if self._pubsub:
-            await self._pubsub.unsubscribe()
-            await self._pubsub.close()
+            try:
+                await self._pubsub.unsubscribe()
+                await self._pubsub.close()
+            except Exception as e:
+                # 当 supervisor 同时停止所有进程时，redis 可能已经先退出，这里静默处理即可
+                logger.debug(f"[RedisEventBus] 退出时断开订阅失败 (Redis可能已下线): {e}")
         logger.info("[RedisEventBus] Stopped")
 
     async def publish_kill_switch(self, reason: str, triggered_by: int):
