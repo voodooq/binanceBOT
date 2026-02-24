@@ -298,7 +298,19 @@ class GridStrategy(BaseStrategy):
         V2.3: 支持动态密度。新单将根据基于 ATR 的动态步长和密度因子进行布阵。
         """
         if not self._currentAdjustment:
-            return
+            if not self._settings.adaptiveMode:
+                # 修复: 如果关闭了自适应模式，_currentAdjustment 永远不会被 _analysisLoop 设置。
+                # 此时应该注入一个默认的静态 Adjustment 让网格计算能够走下去
+                self._currentAdjustment = GridAdjustment(
+                    state=MarketState.NORMAL,
+                    gridCenterShift=Decimal("0"),
+                    densityMultiplier=Decimal("1"),
+                    investmentMultiplier=Decimal("1"),
+                    shouldPause=False
+                )
+            else:
+                logger.info("🛡️ [诊断] 自适应分析未完成，暂缓挂单")
+                return
 
         # 计算当前动态步长
         baseStep = (self._settings.gridUpperPrice - self._settings.gridLowerPrice) / Decimal(str(self._settings.gridCount))
@@ -342,8 +354,8 @@ class GridStrategy(BaseStrategy):
             self._lastSpreadTime = now
             
         if self._lastSpread > self._settings.maxSpreadPercent:
-            logger.warning(
-                "⏸️ 价差过大 (%s%% > %s%%)，暂停在网格 %d 挂单",
+            logger.info(
+                "🛡️ [诊断-拦截] 价差过大 (%s%% > %s%%)，暂停在网格 %d 挂单",
                 self._lastSpread * 100, self._settings.maxSpreadPercent * 100, gridIndex,
             )
             return
@@ -358,8 +370,8 @@ class GridStrategy(BaseStrategy):
         
         totalFunds = freeBalance + totalInvested
         if freeBalance < totalFunds * self._settings.reserveRatio:
-            logger.warning(
-                "⏸️ 可用余额 (%s) 低于预留要求 (%s%%)，暂停新建仓位",
+            logger.info(
+                "🛡️ [诊断-拦截] 可用余额 (%s) 低于预留要求 (%s%%)，暂停新建仓位",
                 freeBalance, self._settings.reserveRatio * 100,
             )
             return
@@ -368,7 +380,7 @@ class GridStrategy(BaseStrategy):
         # 传入当前价格计算实时持仓价值
         positionOverLimit = await self._checkPositionRatio(price)
         if positionOverLimit:
-            logger.warning("⚠️ 持仓占比超限，暂停买入")
+            logger.info("🛡️ [诊断-拦截] 持仓占比超限，暂停买入")
             return
 
         # --- 挂单数上限检查 (V3.0: 本地计数, 0 权重) ---
@@ -377,15 +389,15 @@ class GridStrategy(BaseStrategy):
             if o.status == OrderStatus.PENDING
         )
         if pendingCount >= self._settings.maxOrderCount:
-            logger.warning(
-                "\u26a0\ufe0f 挂单数已达上限 (%d/%d)\uff0c\u6682\u505c\u65b0\u6302\u5355",
+            logger.info(
+                "🛡️ [诊断-拦截] 挂单数已达上限 (%d/%d)，暂停新挂单",
                 pendingCount, self._settings.maxOrderCount,
             )
             return
 
         # --- RateLimiter 熔断检查 ---
         if self._rateLimiter.isInCircuitBreaker:
-            logger.warning("\ud83d\udea8 \u6743\u91cd\u7194\u65ad\u4e2d\uff0c\u8df3\u8fc7\u65b0\u4e70\u5355")
+            logger.info("🛡️ [诊断-拦截] 权重熔断中，跳过新买单")
             return
 
         # 计算买入数量（自适应模式下动态调整投入量）
@@ -420,6 +432,7 @@ class GridStrategy(BaseStrategy):
         currentTime = time.time()
         if currentTime - self._lastTradeTime < self._cooldownSeconds:
             # 冷却期内直接跳过，保障狙击节奏
+            # NOTE 关闭高频打印： logger.info("🛡️ [诊断-拦截] 处于交易冷却期中 (%s 秒前)", currentTime - self._lastTradeTime)
             return
 
         try:
