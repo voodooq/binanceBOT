@@ -1,6 +1,33 @@
+# === 核心交易与网络配置 ===
 python-binance>=1.0.20
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
+python-socks[asyncio]>=2.4.4
+
+# === 框架层 (Web API) ===
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+orjson>=3.9.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-multipart>=0.0.6
+uvloop>=0.19.0; sys_platform != 'win32'
+
+# === 持久化结构 (PostgreSQL + Redis) ===
+sqlalchemy[asyncio]>=2.0.23
+asyncpg>=0.29.0
+alembic>=1.13.1
+redis>=5.0.1
+psycopg2-binary>=2.9.9 # Alembic 离线模式需要同步驱动
+
+# === 安全与认证体系 ===
+pyjwt[crypto]>=2.8.0
+argon2-cffi>=23.1.0
+pyotp>=2.9.0
+qrcode>=7.4
+cryptography>=42.0.0
+
+# === 单元测试设施 ===
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
-python-socks[asyncio]>=2.4.4
+httpx>=0.26.0

@@ -11,5 +11,32 @@ services:
     volumes:
       - ./state:/app/state # 挂载状态文件，防止重启丢失网格进度
       - ./logs:/app/logs # 挂载日志文件，方便在宿主机直接查看
-    # 如果想在启动前自动清理挂单，可以将下面这行取消注释：
-    # command: sh -c "python cleanup.py && python main.py"
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: binancebot_pg
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: binancebot
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: binancebot_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  pg_data:
+  redis_data:
