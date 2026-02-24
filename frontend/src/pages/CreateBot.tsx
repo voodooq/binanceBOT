@@ -1,7 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { cn } from "@/lib/utils";
 import {
     ChevronLeft,
     Settings2,
@@ -148,6 +149,22 @@ export default function CreateBot() {
             navigate("/bots");
         },
     });
+
+    // 计算可视化网格线
+    const gridLevels = useMemo(() => {
+        const lower = parseFloat(formData.parameters.grid_lower_price);
+        const upper = parseFloat(formData.parameters.grid_upper_price);
+        const count = formData.parameters.grid_count;
+
+        if (isNaN(lower) || isNaN(upper) || lower >= upper || count <= 1) return [];
+
+        const step = (upper - lower) / (count - 1);
+        const levels = [];
+        for (let i = 0; i < count; i++) {
+            levels.push(lower + (step * i));
+        }
+        return levels.reverse(); // 从高到低排列
+    }, [formData.parameters.grid_lower_price, formData.parameters.grid_upper_price, formData.parameters.grid_count]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -349,6 +366,66 @@ export default function CreateBot() {
                 <div className="space-y-6">
                     <section className="p-6 rounded-2xl bg-card border border-border shadow-sm sticky top-6">
                         <h3 className="text-sm font-bold uppercase text-muted-foreground mb-4">执行预览</h3>
+
+                        {/* 网格分布可视化 */}
+                        <div className="mb-6 bg-muted/30 rounded-xl p-4 border border-border/50 relative overflow-hidden">
+                            <div className="flex justify-between items-center mb-3">
+                                <span className="text-[10px] font-bold text-muted-foreground uppercase">网格深度分布 (预计)</span>
+                                <div className="flex gap-2">
+                                    <div className="flex items-center gap-1 text-[9px] font-bold"><div className="w-1.5 h-1.5 rounded-full bg-red-500" /> 卖出</div>
+                                    <div className="flex items-center gap-1 text-[9px] font-bold"><div className="w-1.5 h-1.5 rounded-full bg-green-500" /> 买入</div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-1 relative min-h-[120px] pt-2">
+                                {gridLevels.length > 0 ? (
+                                    <>
+                                        {gridLevels.map((lvl: number, idx: number) => {
+                                            const isSell = currentPrice ? lvl > currentPrice : idx < gridLevels.length / 2;
+                                            return (
+                                                <div key={idx} className="flex items-center gap-2 group">
+                                                    <div className={cn(
+                                                        "h-[1.5px] flex-1 rounded-full transition-all",
+                                                        isSell ? "bg-red-500/30 group-hover:bg-red-500/60" : "bg-green-500/30 group-hover:bg-green-500/60"
+                                                    )} />
+                                                    <span className="text-[8px] font-mono text-muted-foreground/60 w-12 text-right">
+                                                        {lvl.toFixed(2)}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+
+                                        {/* 现价指示器 */}
+                                        {currentPrice && (
+                                            <div
+                                                className="absolute left-0 right-0 z-10 flex items-center gap-2 pointer-events-none transition-all duration-500"
+                                                style={{
+                                                    top: (() => {
+                                                        const lower = parseFloat(formData.parameters.grid_lower_price);
+                                                        const upper = parseFloat(formData.parameters.grid_upper_price);
+                                                        const totalRange = upper - lower;
+                                                        if (totalRange <= 0) return '50%';
+                                                        const pos = ((upper - currentPrice) / totalRange) * 100;
+                                                        return `${Math.max(0, Math.min(100, pos))}%`;
+                                                    })()
+                                                }}
+                                            >
+                                                <div className="h-[2px] flex-1 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                                                <div className="px-1.5 py-0.5 bg-primary text-white text-[9px] font-bold rounded flex items-center gap-1 shadow-lg animate-pulse">
+                                                    <div className="w-1 h-1 rounded-full bg-white" />
+                                                    NOW
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                ) : (
+                                    <div className="h-24 flex flex-col items-center justify-center text-muted-foreground/50 border border-dashed border-border rounded-lg">
+                                        <TrendingUp className="w-6 h-6 mb-2 opacity-20" />
+                                        <span className="text-[10px]">设置价格区间以预览网格</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
 
                         <div className="space-y-4">
                             <div className="flex justify-between py-2 border-b border-dashed border-border text-sm">
