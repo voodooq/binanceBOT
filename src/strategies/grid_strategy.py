@@ -328,9 +328,11 @@ class GridStrategy(BaseStrategy):
                 # v2.3 使用价格作为 key，但为了更稳健，我们扫描所有 PENDING 单
                 isPriceOccupied = False
                 for o in self._orders.values():
-                    if o.status == OrderStatus.PENDING and abs(o.price - checkPrice) < (dynamicStep * Decimal("0.1")):
-                        isPriceOccupied = True
-                        break
+                    # 判断如果该价格附近存在 PENDING 或者 已经买入了但还没完成套利清仓的买单(FILLED)，则视为此网格已被占用
+                    if o.side == GridSide.BUY and o.status in (OrderStatus.PENDING, OrderStatus.FILLED):
+                        if abs(o.price - checkPrice) < (dynamicStep * Decimal("0.1")):
+                            isPriceOccupied = True
+                            break
                 
                 if not isPriceOccupied:
                     # 简单估算索引
@@ -565,6 +567,10 @@ class GridStrategy(BaseStrategy):
 
                 # 清除已完成的网格订单，允许重新挂单
                 del self._orders[matchedGrid.price]
+                
+                # 同步清除关联的已持仓买单节点，彻底释放该网格
+                if matchedGrid.entryPrice and matchedGrid.entryPrice in self._orders:
+                    del self._orders[matchedGrid.entryPrice]
 
         # V3 新增: 原子的短生命周期 DB 事务以落库记录此笔完整成交
         try:
@@ -620,13 +626,25 @@ class GridStrategy(BaseStrategy):
             if timeToWait > 0:
                 await asyncio.sleep(timeToWait)
 
+            # --- 🛡️ 仓位预检查 (防止手中无币却盲目触发配对卖出) ---
+            baseAsset = self._settings.tradingSymbol.replace("USDT", "")
+            freeBase = await self._client.getFreeBalance(baseAsset)
+            if freeBase < quantity:
+                logger.warning("⚠️ 基础资产 [%s] 余额不足 (%s < %s)，无法全额挂配对卖单。(可能被手动卖出或清仓)", baseAsset, freeBase, quantity)
+                quantity = freeBase
+                
             # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
             # 卖单同样需要遵守币安的最小交易额度规则
             minNotional = self._client._minNotional
             if (quantity * sellPrice) < minNotional:
-                logger.debug("⚠️ 卖单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * sellPrice), float(minNotional))
-                safeNotional = minNotional * Decimal("1.01")
-                quantity = safeNotional / sellPrice
+                logger.debug("⚠️ 打算挂卖单金额 (%.4f) 小于最低要求 (%s)", float(quantity * sellPrice), float(minNotional))
+                # 对于卖单如果当前仓位连最低卖出都达不到，补足也会因没币而被拒，因此不如跳过不挂单
+                if freeBase >= (minNotional * Decimal("1.01") / sellPrice):
+                    safeNotional = minNotional * Decimal("1.01")
+                    quantity = safeNotional / sellPrice
+                else:
+                    logger.error("❌ 仓位不足以满足交易所最小挂单金额，放弃挂配对卖单。待人工介入。")
+                    return
                 
             # 截断到交易所允许的精度
             quantity = Decimal(self._client.formatQuantity(quantity))
