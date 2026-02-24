@@ -12,10 +12,21 @@ class CryptoService:
         master_key = settings.MASTER_ENCRYPTION_KEY
         if not master_key:
             raise RuntimeError("MASTER_ENCRYPTION_KEY is not set.")
-        # Ensure it's valid format for Fernet
-        # Fernet takes urlsafe-base64-encoded 32-byte key
-        self._master_fernet = Fernet(master_key.encode())
+        
+        # 预处理：确保是字符串并彻底剥离引号/空格
+        master_key = str(master_key).strip().strip("'\"")
+        
+        try:
+            self._master_fernet = Fernet(master_key.encode())
+        except ValueError as e:
+            # 增加调试信息：到底传进去了多长、什么样格式的秘钥
+            key_len = len(master_key)
+            print(f"CRITICAL: MASTER_ENCRYPTION_KEY validation failed! Length: {key_len}")
+            # 重新抛出，带上更多线索
+            raise ValueError(f"Invalid MASTER_ENCRYPTION_KEY (Length: {key_len}). Must be 32 url-safe base64-encoded bytes.") from e
+            
         self._ph = PasswordHasher()
+
 
     # --- PWD Hashing ---
     def hash_password(self, password: str) -> str:
