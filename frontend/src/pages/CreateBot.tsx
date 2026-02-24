@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
     ChevronLeft,
     Settings2,
@@ -75,6 +75,19 @@ export default function CreateBot() {
             exchange: selectedKey ? selectedKey.exchange : "Binance"
         });
     };
+
+    // 自动计算投资额：网格数 * 单格投入 * (1 + 0.002 手续费缓冲)
+    useEffect(() => {
+        const count = formData.parameters.grid_count;
+        const perGrid = formData.parameters.grid_investment_per_grid;
+        if (count > 0 && perGrid > 0) {
+            const calculated = (count * perGrid) * 1.002;
+            setFormData(prev => ({
+                ...prev,
+                total_investment: parseFloat(calculated.toFixed(2))
+            }));
+        }
+    }, [formData.parameters.grid_count, formData.parameters.grid_investment_per_grid]);
 
     // 一键填充推荐策略
     const applyStrategy = (type: "conservative" | "moderate" | "aggressive") => {
@@ -221,13 +234,17 @@ export default function CreateBot() {
                                 </select>
                             </div>
                             <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">投资总额 (USDT)</label>
+                                <div className="flex justify-between items-center ml-1">
+                                    <label className="text-xs font-bold uppercase">投资总额 (USDT)</label>
+                                    <span className="text-[10px] text-primary font-bold">已含 0.2% 手续费</span>
+                                </div>
                                 <input
                                     type="number"
                                     required
                                     value={formData.total_investment}
                                     onChange={(e) => setFormData({ ...formData, total_investment: parseFloat(e.target.value) })}
-                                    className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                                    placeholder="自动演算中..."
+                                    className="w-full px-4 py-3 bg-muted/50 border border-border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all font-bold text-primary"
                                 />
                             </div>
                         </div>
