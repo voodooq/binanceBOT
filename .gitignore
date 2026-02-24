@@ -36,3 +36,8 @@ Thumbs.db
 # 测试结果与调试输出
 *.txt
 !requirements.txt
+# 前端相关
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.eslintcache

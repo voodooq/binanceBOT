@@ -10,10 +10,10 @@ import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
+from dataclasses import dataclass
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
-from src.config.binance_config import Settings
 from src.utils.rate_limiter import RateLimiter
 from src.utils.error_handler import (
     ApiError,
@@ -42,16 +42,25 @@ def _toBinanceApiError(e: BinanceAPIException) -> ApiError:
     return ApiError(code=code, message=e.message)
 
 
+@dataclass
+class ClientConfig:
+    apiKey: str
+    apiSecret: str
+    useTestnet: bool
+    tradingSymbol: str
+    proxy: str | None = None
+
 class BinanceClient:
     """
     币安交易所客户端。
 
     提供 REST API 调用（账户查询、下单、撤单）和 WebSocket 订阅
     （实时行情、用户数据流）。所有操作均为异步，经过速率限制。
+    支持 V3.0 多账户隔离，基于实例级 ClientConfig 注入凭据。
     """
 
-    def __init__(self, settings: Settings, rateLimiter: RateLimiter) -> None:
-        self._settings = settings
+    def __init__(self, config: ClientConfig, rateLimiter: RateLimiter) -> None:
+        self._settings = config
         self._rateLimiter = rateLimiter
         self._client: AsyncClient | None = None
         self._socketManager: BinanceSocketManager | None = None
@@ -87,12 +96,14 @@ class BinanceClient:
         """
         logger.info("🔗 正在连接币安 %s ...", "测试网" if self._settings.useTestnet else "主网")
 
-        # NOTE: 代理已在 main.py 统一配置到 os.environ，
-        # 底层 aiohttp 会自动读取 HTTPS_PROXY / HTTP_PROXY。
+        # NOTE: 支持针对该 Client 级别的独立代理绑定
+        requests_params = {"proxy": self._settings.proxy} if self._settings.proxy else None
+        
         self._client = await AsyncClient.create(
             api_key=self._settings.apiKey,
             api_secret=self._settings.apiSecret,
             testnet=self._settings.useTestnet,
+            requests_params=requests_params,
         )
 
         # 同步服务器时间

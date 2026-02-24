@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from datetime import datetime
 from enum import Enum
-from src.config.binance_config import Settings
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class MarketAnalyzer:
     CONFIRMATION_CANDLES = 2   # 连续 N 根确认后才正式切换状态
     COOLING_CANDLES = 3        # 退出阴跌/恐慌后的静默 K 线数
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Any = None) -> None:
         self._settings = settings
         if settings and hasattr(settings, 'rsiBleedThreshold'):
             self.ENTER_BLEED_RSI = Decimal(str(settings.rsiBleedThreshold))

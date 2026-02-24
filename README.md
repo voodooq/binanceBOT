@@ -1,96 +1,87 @@
-# 币安量化交易机器人 (Binance Grid Trading Bot)
+# BinanceBot V3.0 - 资管级量化交易系统
 
-本项目是一个基于 Python 异步架构（`asyncio` + `BinanceSocketManager`）实现的币安（Binance）专属量化网格交易机器人。支持实时行情监听、订单状态追踪、Telegram 通知以及持久化状态管理。
+本项目是一个基于 Python 异步引擎（FastAPI + asyncio）与 React 现代化前端构建的币安（Binance）专业网格交易系统。V3.0 引入了**多账户支持**、**信封加密安全机制**、**WebSocket 实时监控集线器**以及**全栈容器化部署**。
 
-## 🌟 主要功能
-
-- **网格交易策略**：自动化高抛低吸，支持自定义网格上限、下限、网格数等参数。
-- **异步与高并发**：底层采用 `aiohttp` 和 `python-binance` 异步流，实现毫秒级行情与订单响应。
-- **WebSocket 数据流**：通过多路复用或独立 WebSocket 监听实时价格和 `userDataStream` (订单状态)。
-- **持久化与容灾**：运行状态落盘，Docker 环境下通过 Volume 挂载，支持进程崩溃、重启后自动恢复交易进度。
-- **多端通知**：内建 Telegram Bot 支持，实时播报挂单、成交、策略启停及异常告警。
-- **Docker 化部署**：提供完整的 `Dockerfile` 与 `docker-compose.yml`，一键部署应用及依赖（PostgreSQL、Redis）。
+## 🚀 核心特性 (V3.0 新增)
+- **多账户管理**: 支持同时挂载多个 Binance 账户（实盘或 Testnet），且支持每个账户绑定独立的代理服务器。
+- **资管级安全**: API Secret 采用信封加密 (Envelope Encryption)，私钥仅在内存中临时还原，禁止明文落地。
+- **现代化 UI**: 基于 React + Tailwind CSS 的深色模式管理后台，实时观测挂单分布与收益曲线。
+- **高性能引擎**: 采用 `uvloop` (Linux) 与 `orjson` 优化，支持高并发挂单与毫秒级事件响应。
+- **生产就绪**: 内置 Nginx 反向代理、自动化 Docker 编排以及跨进程熔断开关 (Kill Switch)。
 
 ## 🛠️ 技术栈
+- **后端**: Python 3.11, FastAPI, SQLAlchemy (异步), PostgreSQL, Redis
+- **前端**: React 19, Vite, Tailwind CSS 4, React Query, Lucide Icons
+- **架构**: Docker Compose, WebSockets, Redis Pub/Sub
 
-- **后端**：Python 3.10+, `asyncio`, `python-binance`, `FastAPI` (预留面板接口)
-- **数据库/缓存**：PostgreSQL 15, Redis 7 (预留为 V3 资管级和全局状态共享准备)
-- **部署发布**：Docker, Docker Compose
-- **代码规范**：统一应用 PEP8，核心逻辑添加完整类型注解与详细中文注释
+## 📦 快速启动 (本地开发)
 
-## 🚀 部署与运行说明
-
-### 1. 环境准备
-
-确保系统已安装 Docker 与 Docker Compose（如果选择本地运行，则需要 Python 3.10+ 环境，并安装 `requirements.txt` 所需依赖）。项目内部采用虚拟化网络防止端口冲突。
-
-### 2. 配置文件
-
-复制示例配置文件，并填入相应的 API Key 和 Telegram 配置：
-
+### 1. 克隆并安装依赖
 ```bash
-cp .env.example .env
-```
-
-**关键配置项（`.env`）：**
-- `BINANCE_API_KEY` / `BINANCE_API_SECRET`：您的币安 API 密钥（建议使用只具备交易权限的子账号）。
-- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`：用于接收日志与告警通知。
-- `PROXY_URL`（如处于国内环境）：机器人会自动为所有底层网络请求配置代理。
-
-### 3. 一键启动 (推荐)
-
-使用 Docker Compose 会同时启动机器人主程序、PostgreSQL 与 Redis。
-
-```bash
-# 以后台模式运行
-docker-compose up -d
-
-# 查看运行日志
-docker-compose logs -f binance-bot
-```
-
-### 4. 本地环境测试
-
-若需进行本地开发与调试：
-
-```bash
-# 建立虚拟环境
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 安装依赖
+# 后端
 pip install -r requirements.txt
-
-# 运行机器人
-python main.py
-
-# (可选) 运行回测或清理测试网脚本
-python cleanup.py
+# 前端
+cd frontend && npm install
 ```
+
+### 2. 环境配置
+复制 `.env.example` 为 `.env` 并填写必要信息（如数据库、加密主密钥等）。
+
+### 3. 启动开发服务
+```bash
+# 后端
+uvicorn src.main:app --reload
+# 前端
+cd frontend && npm run dev
+```
+
+## 🏗️ 生产环境部署 (推荐：Docker Compose)
+
+### 1. 编译并启动全栈镜像
+```bash
+docker-compose up -d --build
+```
+系统将自动拉起：
+- **FastAPI Backend (8000)**: 逻辑引擎与 API
+- **Nginx Frontend (80)**: UI 界面与反代
+- **PostgreSQL**: 持久化存储
+- **Redis**: 事件总线与缓存
+
+### 2. 访问地址
+- 前端管理后台: `http://SERVER_IP`
+- API 文档 (Swagger): `http://SERVER_IP/api/v1/openapi.json`
+
+## ☁️ ClawCloud (VPS) 部署方案
+
+如果您使用的是 ClawCloud 或类似的海外 VPS，可以按照以下步骤快速部署：
+
+1. **环境初始化**:
+   ```bash
+   sudo apt update && sudo apt install docker.io docker-compose -g git -y
+   ```
+2. **下载代码**:
+   ```bash
+   git clone <YOUR_REPO_URL>
+   cd binancebot
+   ```
+3. **配置参数**:
+   - `mv .env.example .env` 
+   - 修改 `MASTER_KEY` (32位强随机字符串) 及数据库密码。
+   - **重要**: 设置 `BINANCE_PROXY` (如果是在受限地区)。
+4. **一键启动**:
+   ```bash
+   docker-compose up -d --build
+   ```
 
 ## 📂 项目结构
+- `/src`: 后端核心逻辑（API, 模型, 策略引擎）
+- `/frontend`: React 前端源码
+- `/migrations`: Alembic 数据库迁移
+- `/state`: 运行时策略持久化状态 (JSON)
 
-```text
-├── src/                # 核心源代码
-│   ├── api/            # API 路由与端点
-│   ├── config/         # 环境与配置管理
-│   ├── db/             # 数据库模型与会话管理
-│   ├── exchanges/      # 交易所客户端 (币安 API 封装)
-│   ├── models/         # 数据库 ORM 模型定义
-│   ├── strategies/     # 交易策略实现 (网格策略核心)
-│   └── utils/          # 日志、通知、限流等通用工具
-├── tests/              # 单元与集成测试目录
-├── migrations/         # Alembic 数据库迁移脚本
-├── .env.example        # 配置示例文件
-├── docker-compose.yml  # Docker Compose 编排文件
-├── Dockerfile          # Docker 镜像构建文件
-├── main.py             # 交易机器人主入口程序
-└── cleanup.py          # 测试环境一键清理脚本
-```
+## 🛡️ 安全注意事项
+- **不要提交 .env 文件**: 生产环境下应妥善保管 `MASTER_KEY`，一旦丢失将无法还原 API Secret。
+- **代理建议**: 建议在使用 Binance 时为每个机器人分配独立的静态代理以分散 IP 风险。
 
-## 🛡️ 安全规范与开发约定
-
-本项目严格遵循以下安全与开发原则：
-- **安全第一**：核心敏感数据（API Key 等）仅通过本地环境变量加载，**严禁将密钥等凭证上传至代码仓库**。
-- **规范先行**：保持高质量的文档注释与类型提示，所有新增业务逻辑必须独立于框架耦合。
-- **稳健运行**：任何外部 API 交互必须经过 `RateLimiter`（限流器）统领，避免触发交易所风控机制或引起服务宕机。
+## ⚖️ 免责声明
+量化交易存在风险，本项目仅供技术调研与学习使用。作者不对任何因使用本项目造成的财务损失负责。

@@ -13,16 +13,40 @@ from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass
 
-from src.config.binance_config import Settings
 from src.exchanges.binance_client import BinanceClient
 from src.utils.notifier import Notifier
 from src.strategies.market_analyzer import MarketAnalyzer, MarketState, GridAdjustment
+from src.strategies.base_strategy import BaseStrategy
+from src.models.bot import BotConfig
 
 logger = logging.getLogger(__name__)
 
-# 状态持久化文件路径
+# 状态持久化文件路径 (V3.0 中可以迁移至数据库，暂不阻断旧逻辑)
 STATE_DIR = Path(__file__).resolve().parent.parent.parent / "state"
+
+@dataclass
+class GridSettingsProxy:
+    """临时将 JSON 参数转为强类型风格的小配置类，接平 V2 的历史代码"""
+    gridLowerPrice: Decimal
+    gridUpperPrice: Decimal
+    gridCount: int
+    gridInvestmentPerGrid: Decimal
+    reserveRatio: Decimal
+    adaptiveMode: bool
+    analysisInterval: int
+    maxSpreadPercent: Decimal
+    maxOrderCount: int
+    maxPositionRatio: Decimal
+    stopLossPercent: Decimal
+    takeProfitAmount: Decimal
+    martinMultiplier: Decimal
+    maxMartinLevels: int
+    tradingSymbol: str # 用来兼容日志
+    tradeCooldown: float = 5.0
+    staleDataTimeout: float = 300.0
+    decayMinMultiplier: Decimal = Decimal("0.2")
 
 
 class GridSide(str, Enum):
@@ -88,7 +112,7 @@ class GridOrder:
         )
 
 
-class GridStrategy:
+class GridStrategy(BaseStrategy):
     """
     网格交易策略引擎。
 
@@ -98,17 +122,35 @@ class GridStrategy:
     3. 买单成交后，在上一级网格自动挂卖单（配对利润循环）
     4. 持续检测风控条件（止损/止盈/价差/资金预留）
     """
+    
+    def __init__(self, bot_config: BotConfig, client: BinanceClient):
+        super().__init__(bot_config, client)
+        
+        # NOTE: 实例化 V3 V2 的兼容配置代理
+        p = bot_config.parameters
+        self._settings = GridSettingsProxy(
+            gridLowerPrice=Decimal(str(p.get("grid_lower_price", 0))),
+            gridUpperPrice=Decimal(str(p.get("grid_upper_price", 0))),
+            gridCount=int(p.get("grid_count", 0)),
+            gridInvestmentPerGrid=Decimal(str(p.get("grid_investment_per_grid", 0))),
+            reserveRatio=Decimal(str(p.get("reserve_ratio", "0.05"))),
+            adaptiveMode=bool(p.get("adaptive_mode", False)),
+            analysisInterval=int(p.get("analysis_interval", 15)),
+            maxSpreadPercent=Decimal(str(p.get("max_spread_percent", "0.005"))),
+            maxOrderCount=int(p.get("max_order_count", 50)),
+            maxPositionRatio=Decimal(str(p.get("max_position_ratio", "0.95"))),
+            stopLossPercent=Decimal(str(p.get("stop_loss_percent", "0.2"))),
+            takeProfitAmount=Decimal(str(p.get("take_profit_amount", "1000"))),
+            martinMultiplier=Decimal(str(p.get("martin_multiplier", "1.5"))),
+            maxMartinLevels=int(p.get("max_martin_levels", 3)),
+            tradingSymbol=bot_config.symbol,
+            tradeCooldown=float(p.get("trade_cooldown", 5.0)),
+            staleDataTimeout=float(p.get("stale_data_timeout", 300.0)),
+        )
 
-    def __init__(
-        self,
-        settings: Settings,
-        client: BinanceClient,
-        notifier: Notifier,
-    ) -> None:
-        self._settings = settings
-        self._client = client
-        self._notifier = notifier
-
+        from src.utils.notifier import Notifier # 临时提供 None，或者你可以从某个上下文获取
+        self._notifier = Notifier() # 如果不需要发送，直接 mock 掉
+        
         # 网格价位列表（从低到高）
         self._gridPrices: list[Decimal] = []
         # 挂单池：price (Decimal) -> GridOrder
@@ -125,7 +167,7 @@ class GridStrategy:
         self._lastSpreadTime: float = 0
 
         # --- 自适应策略 ---
-        self._analyzer = MarketAnalyzer(settings)
+        self._analyzer = MarketAnalyzer(self._settings)
         self._currentAdjustment: GridAdjustment | None = None
         self._analysisTask: asyncio.Task | None = None
 
@@ -135,7 +177,7 @@ class GridStrategy:
 
         # --- ⏳ 交易冷却锁 ---
         self._lastTradeTime: float = 0.0
-        self._cooldownSeconds: float = getattr(settings, "tradeCooldown", 5.0)
+        self._cooldownSeconds: float = self._settings.tradeCooldown
 
         # --- RateLimiter 引用（通过 client 间接访问） ---
         self._rateLimiter = client._rateLimiter
@@ -207,12 +249,14 @@ class GridStrategy:
             f"可用余额: {freeBalance} USDT\n"
             f"自适应模式: {'✅ 已启用' if self._settings.adaptiveMode else '❌ 未启用'}"
         )
+        # 顺势拉起主循环
+        await self.start()
 
     # ==================================================
     # 核心交易逻辑
     # ==================================================
 
-    async def onPriceUpdate(self, price: Decimal) -> None:
+    async def on_price_update(self, price: Decimal) -> None:
         """
         价格更新回调 — WebSocket 推送新价格时调用。
 
@@ -412,7 +456,7 @@ class GridStrategy:
         except Exception as e:
             logger.error("❌ 网格 %d 买单失败: %s", gridIndex, e)
 
-    async def onOrderUpdate(self, event: dict[str, Any]) -> None:
+    async def on_order_update(self, event: dict[str, Any]) -> None:
         """
         订单状态更新回调 — 用户数据流推送时调用。
 
@@ -659,13 +703,13 @@ class GridStrategy:
         self._saveState()
 
     # ==================================================
-    # 策略生命周期
+    # 策略生命周期 (重写自 BaseStrategy.initialize)
     # ==================================================
 
     async def start(self) -> None:
-        """启动策略"""
+        """启动策略 (保留原名叫 start 作为内部别名或外部主动调用)"""
         self._running = True
-        logger.info("🚀 网格策略已启动")
+        logger.info("🚀 网格策略已启动 (ID: %d)", self.bot_config.id)
 
         # 记录初始净值（用于回撤计算）
         try:
@@ -836,7 +880,8 @@ class GridStrategy:
     def _saveState(self) -> None:
         """将策略状态保存到 JSON 文件，支持重启恢复"""
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        stateFile = STATE_DIR / f"{self._settings.tradingSymbol}_grid.state.json"
+        # 用 Bot ID 替代单一的交易对命名
+        stateFile = STATE_DIR / f"bot_{self.bot_config.id}_grid.state.json"
 
         state = {
             "realizedProfit": str(self._realizedProfit),
@@ -859,7 +904,8 @@ class GridStrategy:
 
         @returns 是否成功恢复
         """
-        stateFile = STATE_DIR / f"{self._settings.tradingSymbol}_grid.state.json"
+        # 用 Bot ID 替代单一的交易对命名
+        stateFile = STATE_DIR / f"bot_{self.bot_config.id}_grid.state.json"
 
         if not stateFile.exists():
             return False

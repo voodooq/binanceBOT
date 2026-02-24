@@ -1,41 +1,63 @@
 version: '3.8'
 
 services:
-  binance-bot:
+  backend:
     build: .
-    image: binance-bot:v3
-    container_name: grid_bot
-    restart: always # 机器重启后自动重启机器人
+    image: binance-bot-backend:v3
+    container_name: bb_backend
+    restart: always
     env_file:
-      - .env # 自动将宿主机的 .env 文件注入到容器中
+      - .env
     volumes:
-      - ./state:/app/state # 挂载状态文件，防止重启丢失网格进度
-      - ./logs:/app/logs # 挂载日志文件，方便在宿主机直接查看
+      - ./state:/app/state
+      - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
+    networks:
+      - bb_network
+
+  frontend:
+    build: ./frontend
+    image: binance-bot-frontend:v3
+    container_name: bb_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - bb_network
 
   postgres:
     image: postgres:15-alpine
-    container_name: binancebot_pg
+    container_name: bb_pg
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: binancebot
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-binancebot}
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    networks:
+      - bb_network
 
   redis:
     image: redis:7-alpine
-    container_name: binancebot_redis
+    container_name: bb_redis
     restart: always
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - bb_network
+
+networks:
+  bb_network:
+    driver: bridge
 
 volumes:
   pg_data:
