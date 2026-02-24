@@ -125,12 +125,16 @@ async def stop_bot(
         raise HTTPException(status_code=404, detail="未找到该机器人")
         
     success = await strategy_manager.stop_bot(bot.id)
+    
+    # 无论引擎是否真的在跑这只 bot（可能是容器重启导致的 DB 保存了残魂 RUNNING 态）
+    # 都把它的名份给清理成停止，以便允许用户接下来的操作。
+    bot.status = BotStatus.STOPPED
+    await db.commit()
+
     if success:
-        bot.status = BotStatus.STOPPED
-        await db.commit()
         return {"msg": "Bot 已停止工作并清理挂单"}
     else:
-        raise HTTPException(status_code=400, detail="该机器人不在运行状态或已被强制销毁")
+        return {"msg": "Bot 引擎中未发现活跃运行态，已强制重置数据库状态为停止"}
 
 @router.get("/{bot_id}", response_model=BotConfigResponse)
 async def get_bot(
