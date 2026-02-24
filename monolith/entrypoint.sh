@@ -9,6 +9,10 @@ chmod 700 /var/lib/postgresql/15/main
 
 # 如果挂载卷内没有 PG_VERSION 文件，说明还不是一个有效的数据库集群，必须初始化
 if [ ! -s "/var/lib/postgresql/15/main/PG_VERSION" ]; then
+    echo "Cleaning up cloud storage artifacts like lost+found..."
+    rm -rf /var/lib/postgresql/15/main/lost+found || true
+    rm -rf /var/lib/postgresql/15/main/.* 2>/dev/null || true
+    
     echo "Initializing empty PostgreSQL data directory..."
     su - postgres -c "/usr/lib/postgresql/15/bin/initdb -D /var/lib/postgresql/15/main"
     # 初始化后把我们之前准备好的配置文件写进去
