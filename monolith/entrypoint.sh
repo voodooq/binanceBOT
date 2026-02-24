@@ -54,8 +54,17 @@ cd /app
 /app/venv/bin/alembic upgrade head
 
 # 3. 停止通过 init.d 启动的服务，转交给 supervisord 接管前台运行
-/etc/init.d/redis-server stop
-/etc/init.d/postgresql stop
+/etc/init.d/redis-server stop || true
+/etc/init.d/postgresql stop || true
+sleep 2
+
+# 强力清理：确保没有残留进程占用端口或锁文件
+echo "Ensuring a clean slate for supervisord..."
+pkill -9 postgres || true
+pkill -9 redis-server || true
+rm -rf /var/run/postgresql/*.pid /var/run/redis/*.pid || true
+rm -rf /var/lib/postgresql/15/main/postmaster.pid || true
 
 echo "Starting all services via supervisord..."
 exec /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
+
