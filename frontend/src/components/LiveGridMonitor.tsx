@@ -16,7 +16,7 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
     const count = parseInt(bot.parameters?.grid_count || "0");
 
     useEffect(() => {
-        if (!bot.symbol || bot.status !== "RUNNING") return;
+        if (!bot.symbol || bot.status?.toUpperCase() !== "RUNNING") return;
 
         const fetchPrice = async () => {
             try {
@@ -33,7 +33,7 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
         return () => clearInterval(timer);
     }, [bot.symbol, bot.status]);
 
-    if (bot.status !== "RUNNING") {
+    if (bot.status?.toUpperCase() !== "RUNNING") {
         return (
             <div className="flex flex-col h-full bg-zinc-950 rounded-2xl border border-zinc-800 p-6 font-mono">
                 <div className="flex items-center gap-2 text-zinc-400 mb-6">

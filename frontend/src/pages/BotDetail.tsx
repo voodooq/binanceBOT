@@ -50,7 +50,7 @@ export default function BotDetail() {
                             <h1 className="text-2xl font-bold tracking-tight">{bot.name}</h1>
                             <span className={cn(
                                 "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                                bot.status === "RUNNING" ? "bg-green-500/10 text-green-500" : "bg-muted text-muted-foreground"
+                                bot.status?.toUpperCase() === "RUNNING" ? "bg-green-500/10 text-green-500" : "bg-muted text-muted-foreground"
                             )}>
                                 {bot.status}
                             </span>
@@ -62,7 +62,7 @@ export default function BotDetail() {
                 <div className="flex items-center gap-3">
                     <div className="px-4 py-2 bg-card border border-border rounded-xl">
                         <p className="text-[10px] text-muted-foreground uppercase font-bold">运行状态</p>
-                        <p className="text-sm font-bold">{bot.status === 'RUNNING' ? '运行中' : bot.status === 'STOPPED' ? '已停止' : '空闲'}</p>
+                        <p className="text-sm font-bold">{bot.status?.toUpperCase() === 'RUNNING' ? '运行中' : bot.status?.toUpperCase() === 'STOPPED' ? '已停止' : '空闲'}</p>
                     </div>
                     <div className="px-4 py-2 bg-card border border-border rounded-xl">
                         <p className="text-[10px] text-muted-foreground uppercase font-bold">创建时间</p>
