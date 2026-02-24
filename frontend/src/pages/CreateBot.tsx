@@ -120,9 +120,10 @@ export default function CreateBot() {
 
     const createMutation = useMutation({
         mutationFn: async (data: any) => {
-            // 构造符合后端要求的 Payload
+            // 构造符合后端要求的 Payload，排除多余的非表单字段
+            const { exchange, ...formPayload } = data;
             const payload = {
-                ...data,
+                ...formPayload,
                 api_key_id: parseInt(data.api_key_id),
                 base_asset: data.symbol.replace("USDT", ""),
                 quote_asset: "USDT",
