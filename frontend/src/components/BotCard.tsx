@@ -57,7 +57,7 @@ export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails }: BotCa
                         "text-xl font-bold tracking-tight",
                         parseFloat(bot.total_pnl) >= 0 ? "text-green-500" : "text-destructive"
                     )}>
-                        {parseFloat(bot.total_pnl) >= 0 ? "+" : ""}{bot.total_pnl}
+                        {parseFloat(bot.total_pnl) >= 0 ? "+" : ""}{parseFloat(bot.total_pnl).toFixed(4)}
                     </p>
                 </div>
 
@@ -91,7 +91,7 @@ export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails }: BotCa
                     <button
                         onClick={() => onDelete(bot.id)}
                         className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
-                        title="删除"
+                        title={isRunning ? "强制停止并删除" : "删除"}
                     >
                         <Trash2 className="w-4 h-4" />
                     </button>

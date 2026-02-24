@@ -55,12 +55,28 @@ export default function BotList() {
     };
 
     const handleDelete = async (id: number) => {
-        if (window.confirm("确定要删除这个机器人吗？此操作不可逆。")) {
-            try {
-                await api.delete(`/bots/${id}`);
-                refetch();
-            } catch (error) {
-                console.error("删除失败", error);
+        const botToDelete = bots.find(b => b.id === id);
+        if (!botToDelete) return;
+
+        if (botToDelete.status === "RUNNING") {
+            if (window.confirm(`[${botToDelete.name}] 正在运行中，您确定要强制停止并彻底删除它吗？`)) {
+                try {
+                    await api.post(`/bots/${id}/stop`);
+                    await api.delete(`/bots/${id}`);
+                    refetch();
+                } catch (error) {
+                    console.error("强制删除失败", error);
+                    alert("强制删除过程失败，请检查控制台。");
+                }
+            }
+        } else {
+            if (window.confirm("确定要删除这个机器人吗？此操作不可逆。")) {
+                try {
+                    await api.delete(`/bots/${id}`);
+                    refetch();
+                } catch (error) {
+                    console.error("删除失败", error);
+                }
             }
         }
     };
