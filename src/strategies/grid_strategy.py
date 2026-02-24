@@ -12,14 +12,14 @@ import time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any
 from dataclasses import dataclass
 
 from src.exchanges.binance_client import BinanceClient
 from src.utils.notifier import Notifier
 from src.strategies.market_analyzer import MarketAnalyzer, MarketState, GridAdjustment
-from src.strategies.base_strategy import BaseStrategy
 from src.models.bot import BotConfig
+from src.db.session import AsyncSessionLocal
+from src.strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -523,6 +523,8 @@ class GridStrategy(BaseStrategy):
         matchedGrid.status = OrderStatus.FILLED
         filledPrice = Decimal(event.get("L", "0"))  # 最后成交价
         filledQty = Decimal(event.get("z", "0"))     # 累计成交数量
+        feeAmt = Decimal(event.get("n", "0"))        # 手续费
+        feeAsset = event.get("N", "")               # 手续费币种
 
         if side == "BUY":
             logger.info(
@@ -562,6 +564,27 @@ class GridStrategy(BaseStrategy):
 
                 # 清除已完成的网格订单，允许重新挂单
                 del self._orders[matchedGrid.price]
+
+        # V3 新增: 原子的短生命周期 DB 事务以落库记录此笔完整成交
+        try:
+            from src.models.trade import Trade, OrderSide as DBOrderSide, OrderStatus as DBOrderStatus
+            async with AsyncSessionLocal() as session:
+                new_trade = Trade(
+                    bot_config_id=self.bot_config.id,
+                    exchange_order_id=str(orderId) if orderId is not None else "local",
+                    symbol=self._settings.tradingSymbol,
+                    side=DBOrderSide.BUY if side == "BUY" else DBOrderSide.SELL,
+                    price=filledPrice,
+                    quantity=filledQty,
+                    executed_qty=filledQty,
+                    status=DBOrderStatus.FILLED,
+                    fee=feeAmt,
+                    fee_asset=feeAsset
+                )
+                session.add(new_trade)
+                await session.commit()
+        except Exception as e:
+            logger.error("记录 Trade 订单 [bot=%d, orderId=%s] 入库失败: %s", self.bot_config.id, orderId, e)
 
         self._saveState()
 
