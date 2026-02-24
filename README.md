@@ -51,27 +51,31 @@ docker-compose up -d --build
 - 前端管理后台: `http://SERVER_IP`
 - API 文档 (Swagger): `http://SERVER_IP/api/v1/openapi.json`
 
-## ☁️ ClawCloud (VPS) 部署方案
+## ☁️ 生产环境部署方案
 
-如果您使用的是 ClawCloud 或类似的海外 VPS，可以按照以下步骤快速部署：
+根据您的服务器环境，V3.0 提供两种主流的容器化部署方式。
 
-1. **环境初始化**:
-   ```bash
-   sudo apt update && sudo apt install docker.io docker-compose -g git -y
-   ```
-2. **下载代码**:
-   ```bash
-   git clone <YOUR_REPO_URL>
-   cd binancebot
-   ```
-3. **配置参数**:
-   - `mv .env.example .env` 
-   - 修改 `MASTER_KEY` (32位强随机字符串) 及数据库密码。
-   - **重要**: 设置 `BINANCE_PROXY` (如果是在受限地区)。
-4. **一键启动**:
-   ```bash
-   docker-compose up -d --build
-   ```
+### 方案 A: 经典多容器编排（推荐）
+适合有 SSH 权限的标准 VPS，如常规运行的 Ubuntu/Debian 系统。
+
+1. **环境初始化**: `sudo apt update && sudo apt install docker.io docker-compose -g git -y`
+2. **下载代码**: `git clone <YOUR_REPO_URL> && cd binancebot`
+3. **极简配置**: `cp .env.example .env`（**务必**填写 `MASTER_ENCRYPTION_KEY` 与数据库密码）
+4. **一键启动**: `bash deploy.sh` (自动拉起网关、后端、PostgreSQL、Redis 四大容器)
+
+### 方案 B: All-in-One 单体应用部署 (ClawCloud / 宝塔面板)
+适合使用 **App Launchpad** 或仅支持输入单一镜像名称的保姆式云服务器控制台。在这一模式下，四大组件全内置在一个容器内。
+
+**只需在面板中配置以下项目即可：**
+* **Image Name**: `ghcr.io/voodooq/binancebot-standalone:latest`
+* **NodePorts/端口映射**: 将容器内部的 `80` 端口映射到公网（如 80 或 8080）。
+* **Environment Variables (环境变量)**: 
+  * `POSTGRES_USER=postgres`
+  * `POSTGRES_PASSWORD=您设置的密码`
+  * `POSTGRES_DB=binancebot`
+  * `MASTER_ENCRYPTION_KEY=32位强随机字符`
+  * `JWT_SECRET=任意复杂字符串`
+* **Local Storage (硬盘挂载)**: **(必选)** 添加挂载路径 `/var/lib/postgresql/15/main` 以永久保存您的机器人数值和账号数据。
 
 ## 📂 项目结构
 - `/src`: 后端核心逻辑（API, 模型, 策略引擎）

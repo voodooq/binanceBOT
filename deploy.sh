@@ -1,7 +1,12 @@
 #!/bin/bash
 
-# --- BinanceBot V3.0 一键部署脚本 ---
-# 适用环境：ClawCloud / Ubuntu / Debian / CentOS (需预装 Docker)
+# --- BinanceBot V3.0 一键部署脚本 (方案 A: Docker Compose) ---
+# 适用环境：有完整 SSH 权限的 Ubuntu / Debian / CentOS (需预装 Docker)
+# 
+# ⚠️ 注意: 如果您使用的是 ClawCloud App Launchpad 或宝塔面板这类
+# 需要『单一 Docker 镜像』的可视化环境，请勿使用此脚本。
+# 请直接在面板拉取单体镜像 `ghcr.io/voodooq/binancebot-standalone:latest`
+# 详细说明请参见 README.md 中的 [方案 B]。
 
 set -e
 
