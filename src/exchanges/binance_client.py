@@ -672,8 +672,10 @@ class BinanceClient:
                     retry_count = 0
                     while True:
                         try:
-                            # 仅针对接收数据设置 10s 超时
-                            msg = await asyncio.wait_for(stream.recv(), timeout=10.0)
+                            # 去除外层 wait_for 超时。如果交易对冷门（例如测试网），可能几分钟都没成交推送。
+                            # 币安底层的 python-binance 会利用 WebSocket 标准 Ping/Pong (每分钟) 维持 TCP 活性。
+                            # 若真正断网，底层 stream.recv() 会抛出 ConnectionClosed 异常，外层异常块能捕获重建。
+                            msg = await stream.recv()
                             if msg is None: continue
 
                             if "e" in msg and msg["e"] == "error":
@@ -684,8 +686,8 @@ class BinanceClient:
                                 price = Decimal(msg["c"])
                                 asyncio.create_task(onPrice(price))
 
-                        except asyncio.TimeoutError:
-                            logger.warning("⚠️ %s 行情流 10s 无响应 (静默掉线)，尝试跳出重连...", self._settings.tradingSymbol)
+                        except Exception as inner_e:
+                            logger.error("⚠️ %s 行情流接收阻塞报错: %s (连接被异常截断)，尝试跳出重连...", self._settings.tradingSymbol, inner_e)
                             # 跳出内层 while 循环，重新获取 socket 建立握手
                             break
                             
@@ -725,7 +727,9 @@ class BinanceClient:
                     retry_count = 0
                     while True:
                         try:
-                            msg = await asyncio.wait_for(stream.recv(), timeout=180.0)
+                            # 用户流可能长达数小时没有余额变更，绝不能加 recv timeout。
+                            # 让底层的 websocket 依靠协议标准的 ping-pong 维持活性即可。
+                            msg = await stream.recv()
                             if msg is None: continue
 
                             eventType = msg.get("e", "")
@@ -740,8 +744,8 @@ class BinanceClient:
                                 self._lastBalanceUpdate = time.time()
                                 logger.info("💰 资产更新 (WS): %s", self._getBalancesSummary())
 
-                        except asyncio.TimeoutError:
-                            logger.warning("⚠️ 用户数据流 180s 无响应 (心跳中断)，强制跳出重连...")
+                        except Exception as inner_e:
+                            logger.error("⚠️ 用户数据流接收阻塞报错: %s (静默连接被掐断)，强制跳出重连...", inner_e)
                             break
 
             except asyncio.CancelledError:
