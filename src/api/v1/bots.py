@@ -131,3 +131,38 @@ async def stop_bot(
         return {"msg": "Bot 已停止工作并清理挂单"}
     else:
         raise HTTPException(status_code=400, detail="该机器人不在运行状态或已被强制销毁")
+
+@router.get("/{bot_id}", response_model=BotConfigResponse)
+async def get_bot(
+    bot_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """获取单个机器人配置详情"""
+    query = select(BotConfig).where(BotConfig.id == bot_id, BotConfig.user_id == current_user.id)
+    result = await db.execute(query)
+    bot = result.scalar_one_or_none()
+    
+    if not bot:
+        raise HTTPException(status_code=404, detail="未找到该机器人")
+    return bot
+
+@router.delete("/{bot_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_bot(
+    bot_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """强制删除机器人"""
+    query = select(BotConfig).where(BotConfig.id == bot_id, BotConfig.user_id == current_user.id)
+    result = await db.execute(query)
+    bot = result.scalar_one_or_none()
+    
+    if not bot:
+        raise HTTPException(status_code=404, detail="未找到该机器人")
+        
+    if bot.status == BotStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="请先停止运行中的机器人后再删除")
+        
+    await db.delete(bot)
+    await db.commit()

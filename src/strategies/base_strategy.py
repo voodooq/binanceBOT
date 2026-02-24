@@ -18,8 +18,7 @@ class BaseStrategy(ABC):
         @param client: 已初始化的 Binance 客户端实例
         """
         self.bot_config = bot_config
-        self.client = client
-
+        self._client = client
     @abstractmethod
     async def initialize(self) -> None:
         """
