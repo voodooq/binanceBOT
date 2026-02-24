@@ -36,7 +36,7 @@ export default function CreateBot() {
         name: "",
         symbol: "BTCUSDT",
         api_key_id: "",
-        strategy_type: "GRID",
+        strategy_type: "grid",
         is_testnet: true,
         total_investment: 100,
         exchange: "Binance", // Added default to show in preview
