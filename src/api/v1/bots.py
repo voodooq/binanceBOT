@@ -190,7 +190,7 @@ async def list_bot_trades(
     # 2. 查询该机器人的交易记录
     query_trades = (
         select(Trade)
-        .where(Trade.bot_id == bot_id)
+        .where(Trade.bot_config_id == bot_id)
         .order_by(Trade.created_at.desc())
         .offset(skip)
         .limit(limit)
