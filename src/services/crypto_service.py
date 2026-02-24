@@ -1,5 +1,5 @@
 import base64
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from src.core.config import settings
@@ -61,7 +61,10 @@ class CryptoService:
         用于绑定 API Key 时加密用户的 API Secret。
         """
         # 1. 用主密钥解开用户的 DEK
-        dek_bytes = self._master_fernet.decrypt(encrypted_dek_b64.encode())
+        try:
+            dek_bytes = self._master_fernet.decrypt(encrypted_dek_b64.encode())
+        except InvalidToken:
+            raise ValueError("Invalid DEK (Master Key might have changed)")
         # 2. 用 DEK 加密目标数据
         user_fernet = Fernet(dek_bytes)
         return user_fernet.encrypt(secret_str.encode()).decode()
@@ -71,7 +74,10 @@ class CryptoService:
         Decrypt User's DEK with Master Key, then decrypt their Secret with DEK.
         """
         # 1. Decrypt DEK
-        dek_bytes = self._master_fernet.decrypt(encrypted_dek.encode())
+        try:
+            dek_bytes = self._master_fernet.decrypt(encrypted_dek.encode())
+        except InvalidToken:
+            raise ValueError("Invalid DEK (Master Key might have changed)")
         user_fernet = Fernet(dek_bytes)
         # 2. Decrypt Secret
         return user_fernet.decrypt(encrypted_secret.encode()).decode()

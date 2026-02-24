@@ -66,8 +66,8 @@ COPY monolith/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY monolith/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# 暴露唯一的 Web/API 端口
-EXPOSE 80
+# 暴露 Web/API 端口和数据库端口
+EXPOSE 80 5432
 
 # 启动 Supervisord (内部拉起 Nginx, Redis, Postgres, Uvicorn)
 ENTRYPOINT ["/app/entrypoint.sh"]

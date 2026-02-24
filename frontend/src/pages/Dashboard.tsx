@@ -1,11 +1,25 @@
 import { TrendingUp, Wallet, ShieldCheck, Activity } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { useAppStore } from "@/store/useAppStore";
 
 export default function Dashboard() {
+    const { activeApiKeyId } = useAppStore();
+
+    const { data, isLoading } = useQuery({
+        queryKey: ["dashboard-overview", activeApiKeyId],
+        queryFn: async () => {
+            const params = activeApiKeyId ? { api_key_id: activeApiKeyId } : {};
+            const resp = await api.get("/dashboard/overview", { params });
+            return resp.data;
+        }
+    });
+
     const stats = [
-        { name: "总投资额", value: "$12,450.00", icon: Wallet, color: "text-blue-500", bg: "bg-blue-500/10" },
-        { name: "今日收益", value: "+$145.20", icon: TrendingUp, color: "text-green-500", bg: "bg-green-500/10" },
-        { name: "已激活机器人", value: "3", icon: Activity, color: "text-purple-500", bg: "bg-purple-500/10" },
-        { name: "风险等级", value: "低", icon: ShieldCheck, color: "text-amber-500", bg: "bg-amber-500/10" },
+        { name: "总投资额", value: isLoading ? "..." : `$${data?.total_investment?.toFixed(2) || "0.00"}`, icon: Wallet, color: "text-blue-500", bg: "bg-blue-500/10" },
+        { name: "累计收益", value: isLoading ? "..." : `$${data?.total_profit?.toFixed(2) || "0.00"}`, icon: TrendingUp, color: "text-green-500", bg: "bg-green-500/10" },
+        { name: "已激活机器人", value: isLoading ? "..." : `${data?.active_bots || 0}`, icon: Activity, color: "text-purple-500", bg: "bg-purple-500/10" },
+        { name: "风险等级", value: isLoading ? "..." : (data?.risk_level || "未知"), icon: ShieldCheck, color: "text-amber-500", bg: "bg-amber-500/10" },
     ];
 
     return (

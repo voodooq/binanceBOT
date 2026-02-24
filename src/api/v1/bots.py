@@ -52,11 +52,15 @@ async def create_bot(
 async def list_bots(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    api_key_id: int | None = None,
     skip: int = 0,
     limit: int = 100,
 ) -> Any:
     """获取用户的机器人列表"""
-    query = select(BotConfig).where(BotConfig.user_id == current_user.id).offset(skip).limit(limit)
+    query = select(BotConfig).where(BotConfig.user_id == current_user.id)
+    if api_key_id is not None:
+        query = query.where(BotConfig.api_key_id == api_key_id)
+    query = query.offset(skip).limit(limit)
     result = await db.execute(query)
     return result.scalars().all()
 

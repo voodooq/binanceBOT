@@ -49,7 +49,26 @@ async def create_api_key(
             secret_str=key_in.api_secret
         )
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=f"加密处理异常: {e}")
+        # 自愈逻辑：如果解密失败且用户没有 API Key，则尝试自动重新生成并保存新的 DEK
+        # 这一步能解决之前 Master Key 变更导致老账号 500 的问题
+        if "Invalid DEK" in str(e):
+            # 检查用户是否已有绑定的 Key，如有则不能自愈（防止误删）
+            stmt = select(ApiKey).where(ApiKey.user_id == current_user.id)
+            existing_count = await db.execute(stmt)
+            if not existing_count.scalars().first():
+                # 重新生成 DEK 并保存
+                plain_dek, new_encrypted_dek = crypto_service.generate_user_dek()
+                current_user.encrypted_dek = new_encrypted_dek
+                db.add(current_user)
+                # 重新尝试加密
+                encrypted_secret = crypto_service.encrypt_secret_with_dek(
+                    encrypted_dek_b64=new_encrypted_dek,
+                    secret_str=key_in.api_secret
+                )
+            else:
+                raise HTTPException(status_code=500, detail="解密密钥失效且账号已绑定数据，请联系管理员或清理环境")
+        else:
+            raise HTTPException(status_code=500, detail=f"加密处理异常: {e}")
 
     new_key = ApiKey(
         user_id=current_user.id,

@@ -5,6 +5,7 @@ import type { BotStatus } from "@/components/BotCard";
 import { api } from "@/lib/api";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAppStore } from "@/store/useAppStore";
 
 interface Bot {
     id: number;
@@ -18,15 +19,15 @@ interface Bot {
 export default function BotList() {
     const navigate = useNavigate();
     const [search, setSearch] = useState("");
+    const { activeApiKeyId } = useAppStore();
 
-    const { data: bots, isLoading, refetch } = useQuery<Bot[]>({
-        queryKey: ["bots"],
+    const { data: bots = [], isLoading, refetch } = useQuery<Bot[]>({
+        queryKey: ["bots", activeApiKeyId],
         queryFn: async () => {
-            const response = await api.get("/bots/");
+            const params = activeApiKeyId ? { api_key_id: activeApiKeyId } : {};
+            const response = await api.get("/bots/", { params });
             return response.data;
         },
-        // 为测试方便，如果没有数据则返回空数组
-        initialData: [],
     });
 
     const filteredBots = bots.filter(

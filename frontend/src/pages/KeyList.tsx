@@ -14,6 +14,7 @@ export default function KeyList() {
     const queryClient = useQueryClient();
     const [showAdd, setShowAdd] = useState(false);
     const [newKey, setNewKey] = useState({
+        exchange: "binance",
         api_key: "",
         api_secret: "",
         is_testnet: true,
@@ -34,8 +35,11 @@ export default function KeyList() {
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ["api-keys"] });
             setShowAdd(false);
-            setNewKey({ api_key: "", api_secret: "", is_testnet: true });
+            setNewKey({ exchange: "binance", api_key: "", api_secret: "", is_testnet: true });
         },
+        onError: (err: any) => {
+            alert("绑定失败：" + (err.response?.data?.detail || "未知错误"));
+        }
     });
 
     const deleteMutation = useMutation({
