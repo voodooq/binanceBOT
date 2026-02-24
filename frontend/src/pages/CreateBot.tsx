@@ -377,46 +377,66 @@ export default function CreateBot() {
                                 </div>
                             </div>
 
-                            <div className="space-y-1 relative min-h-[120px] pt-2">
+                            <div className="space-y-1 relative min-h-[160px] pt-4 px-1">
                                 {gridLevels.length > 0 ? (
                                     <>
-                                        {gridLevels.map((lvl: number, idx: number) => {
-                                            const isSell = currentPrice ? lvl > currentPrice : idx < gridLevels.length / 2;
-                                            return (
-                                                <div key={idx} className="flex items-center gap-2 group">
-                                                    <div className={cn(
-                                                        "h-[1.5px] flex-1 rounded-full transition-all",
-                                                        isSell ? "bg-red-500/30 group-hover:bg-red-500/60" : "bg-green-500/30 group-hover:bg-green-500/60"
-                                                    )} />
-                                                    <span className="text-[8px] font-mono text-muted-foreground/60 w-12 text-right">
-                                                        {lvl.toFixed(2)}
-                                                    </span>
-                                                </div>
-                                            );
-                                        })}
+                                        {/* 上限提示 */}
+                                        <div className="flex justify-between items-center mb-2 opacity-50">
+                                            <span className="text-[9px] font-bold border-l-2 border-primary/50 pl-2">网格上限</span>
+                                            <span className="text-[9px] font-mono">{gridLevels[0].toFixed(2)}</span>
+                                        </div>
 
-                                        {/* 现价指示器 */}
-                                        {currentPrice && (
-                                            <div
-                                                className="absolute left-0 right-0 z-10 flex items-center gap-2 pointer-events-none transition-all duration-500"
-                                                style={{
-                                                    top: (() => {
-                                                        const lower = parseFloat(formData.parameters.grid_lower_price);
-                                                        const upper = parseFloat(formData.parameters.grid_upper_price);
-                                                        const totalRange = upper - lower;
-                                                        if (totalRange <= 0) return '50%';
-                                                        const pos = ((upper - currentPrice) / totalRange) * 100;
-                                                        return `${Math.max(0, Math.min(100, pos))}%`;
-                                                    })()
-                                                }}
-                                            >
-                                                <div className="h-[2px] flex-1 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
-                                                <div className="px-1.5 py-0.5 bg-primary text-white text-[9px] font-bold rounded flex items-center gap-1 shadow-lg animate-pulse">
-                                                    <div className="w-1 h-1 rounded-full bg-white" />
-                                                    NOW
+                                        <div className="space-y-1.5 relative">
+                                            {gridLevels.map((lvl: number, idx: number) => {
+                                                const isSell = currentPrice ? lvl > currentPrice : idx < gridLevels.length / 2;
+                                                return (
+                                                    <div key={idx} className="flex items-center gap-2 group relative">
+                                                        <div className={cn(
+                                                            "px-1 py-0.5 rounded-[2px] text-[8px] font-bold min-w-[28px] text-center transition-all",
+                                                            isSell ? "bg-red-500/20 text-red-500 group-hover:bg-red-500/40" : "bg-green-500/20 text-green-500 group-hover:bg-green-500/40"
+                                                        )}>
+                                                            {isSell ? "卖出" : "买入"}
+                                                        </div>
+                                                        <div className={cn(
+                                                            "h-[1px] flex-1 rounded-full transition-all border-t border-dashed",
+                                                            isSell ? "border-red-500/20 group-hover:border-red-500/40" : "border-green-500/20 group-hover:border-green-500/40"
+                                                        )} />
+                                                        <span className="text-[8px] font-mono text-muted-foreground/60 w-14 text-right tabular-nums">
+                                                            {lvl.toFixed(2)}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+
+                                            {/* 现价指示器 */}
+                                            {currentPrice && (
+                                                <div
+                                                    className="absolute left-0 right-0 z-10 flex items-center gap-2 pointer-events-none transition-all duration-500 group/now"
+                                                    style={{
+                                                        top: (() => {
+                                                            const lower = parseFloat(formData.parameters.grid_lower_price);
+                                                            const upper = parseFloat(formData.parameters.grid_upper_price);
+                                                            const totalRange = upper - lower;
+                                                            if (totalRange <= 0) return '50%';
+                                                            const pos = ((upper - currentPrice) / totalRange) * 100;
+                                                            return `${Math.max(0, Math.min(100, pos))}%`;
+                                                        })()
+                                                    }}
+                                                >
+                                                    <div className="h-[2px] flex-1 bg-primary/80 shadow-[0_0_12px_rgba(var(--primary),0.6)]" />
+                                                    <div className="px-2 py-1 bg-primary text-white text-[10px] font-black rounded-sm flex items-center gap-1.5 shadow-[0_4px_12px_rgba(0,0,0,0.3)] border border-white/20 scale-110 -mr-1">
+                                                        <div className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                                                        {currentPrice.toFixed(2)}
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        )}
+                                            )}
+                                        </div>
+
+                                        {/* 下限提示 */}
+                                        <div className="flex justify-between items-center mt-3 opacity-50 border-t border-border/30 pt-2">
+                                            <span className="text-[9px] font-bold border-l-2 border-primary/50 pl-2">网格下限</span>
+                                            <span className="text-[9px] font-mono">{gridLevels[gridLevels.length - 1].toFixed(2)}</span>
+                                        </div>
                                     </>
                                 ) : (
                                     <div className="h-24 flex flex-col items-center justify-center text-muted-foreground/50 border border-dashed border-border rounded-lg">
