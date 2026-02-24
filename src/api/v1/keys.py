@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -9,7 +9,7 @@ from src.db.session import get_db
 from src.api.dependencies import get_current_user
 from src.models.user import User
 from src.models.api_key import ApiKey
-from src.services.crypto_service import CryptoService
+from src.services.crypto_service import crypto_service
 
 class ApiKeyCreate(BaseModel):
     exchange: str = "binance"
@@ -23,8 +23,10 @@ class ApiKeyResponse(BaseModel):
     api_key: str
     is_testnet: bool
 
+    model_config = ConfigDict(from_attributes=True)
+
 router = APIRouter()
-crypto_service = CryptoService()
+
 
 @router.post("/", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(

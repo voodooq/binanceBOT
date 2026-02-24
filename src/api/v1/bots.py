@@ -10,11 +10,10 @@ from src.models.user import User
 from src.models.bot import BotConfig, BotStatus
 from src.schemas.bot import BotConfigCreate, BotConfigUpdate, BotConfigResponse
 from src.engine.strategy_manager import strategy_manager
-from src.services.crypto_service import CryptoService
+from src.services.crypto_service import crypto_service
 from src.models.api_key import ApiKey
 
 router = APIRouter()
-crypto_service = CryptoService()
 
 @router.post("/", response_model=BotConfigResponse, status_code=status.HTTP_201_CREATED)
 async def create_bot(
@@ -87,11 +86,13 @@ async def start_bot(
         raise HTTPException(status_code=400, detail="绑定的 API Key 已被删除")
         
     try:
-        api_secret_str = crypto_service.decrypt_secret_with_dek(
+        # NOTE: 使用 CryptoService 的正确方法签名
+        api_secret_str = crypto_service.decrypt_user_secret(
             current_user.encrypted_dek, api_key.encrypted_secret
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail="解密 API Secret 失败，请检查 DEK 连通性")
+
         
     # 调用大盘 StrategyManager 调度此实例
     success = await strategy_manager.start_bot(bot, api_key_str=api_key.api_key, api_secret_str=api_secret_str)

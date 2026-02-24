@@ -6,6 +6,7 @@ class ApiKey(Base):
     __tablename__ = "api_keys"
 
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    exchange = Column(String(50), default="binance", nullable=False)
     api_key = Column(String(100), index=True, nullable=False)
     encrypted_secret = Column(String(255), nullable=False) # API Secret, encrypted by User's DEK
     is_testnet = Column(Boolean, default=False, nullable=False)
