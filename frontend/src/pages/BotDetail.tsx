@@ -9,7 +9,7 @@ import {
     Zap
 } from "lucide-react";
 import { api } from "@/lib/api";
-import { RealtimeLog } from "@/components/RealtimeLog";
+import { LiveGridMonitor } from "@/components/LiveGridMonitor";
 import { cn } from "@/lib/utils";
 
 export default function BotDetail() {
@@ -79,7 +79,9 @@ export default function BotDetail() {
                         已实现收益
                     </p>
                     <div className="flex items-baseline gap-2">
-                        <h2 className="text-3xl font-black text-green-500">+ {bot.total_pnl}</h2>
+                        <h2 className={cn("text-3xl font-black", parseFloat(bot.total_pnl) >= 0 ? "text-green-500" : "text-red-500")}>
+                            {parseFloat(bot.total_pnl) >= 0 ? "+" : ""}{parseFloat(bot.total_pnl).toFixed(4)}
+                        </h2>
                         <span className="text-xs font-medium text-muted-foreground">USDT</span>
                     </div>
                 </div>
@@ -95,19 +97,16 @@ export default function BotDetail() {
                     </div>
                 </div>
 
-                {parseFloat(bot.total_investment) > 0 && parseFloat(bot.total_pnl) !== 0 ? (
+                {parseFloat(bot.total_investment) > 0 ? (
                     <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32">
                         <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
                             <Activity className="w-3 h-3" />
                             ROI
                         </p>
                         <div className="flex items-baseline gap-2">
-                            <h2 className={cn("text-3xl font-black", parseFloat(bot.total_pnl) > 0 ? "text-green-500" : "text-red-500")}>
-                                {((parseFloat(bot.total_pnl) / parseFloat(bot.total_investment)) * 100).toFixed(2)}%
+                            <h2 className={cn("text-3xl font-black", parseFloat(bot.total_pnl) > 0 ? "text-green-500" : parseFloat(bot.total_pnl) < 0 ? "text-red-500" : "text-zinc-500")}>
+                                {parseFloat(bot.total_pnl) > 0 ? "+" : ""}{((parseFloat(bot.total_pnl) / parseFloat(bot.total_investment)) * 100).toFixed(2)}%
                             </h2>
-                            <span className={cn("text-xs font-medium", parseFloat(bot.total_pnl) > 0 ? "text-green-500" : "text-red-500")}>
-                                {parseFloat(bot.total_pnl) > 0 ? "↑" : "↓"}
-                            </span>
                         </div>
                     </div>
                 ) : (
@@ -177,9 +176,9 @@ export default function BotDetail() {
                     </div>
                 </div>
 
-                {/* 右侧实时日志 */}
+                {/* 右侧实时水位监控 */}
                 <div className="lg:col-span-2 h-[600px] lg:h-auto lg:min-h-[600px] sticky top-8">
-                    <RealtimeLog botId={parseInt(id || "0")} />
+                    <LiveGridMonitor bot={bot} />
                 </div>
             </div>
         </div>
