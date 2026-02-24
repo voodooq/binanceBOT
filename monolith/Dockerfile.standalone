@@ -1,0 +1,71 @@
+# ==========================================
+# 阶段 1: 前端构建 (Vite + React)
+# ==========================================
+FROM node:22-alpine as frontend-builder
+WORKDIR /build
+# 避免直接拷贝 node_modules (如果本地存在的话)
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ .
+RUN npm run build
+
+# ==========================================
+# 阶段 2: 最终单体镜像
+# ==========================================
+FROM python:3.11-slim
+
+# 1. 安装系统依赖: Nginx, Supervisor, PostgreSQL 15, Redis, 编译工具
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    nginx \
+    supervisor \
+    redis-server \
+    curl \
+    gnupg2 \
+    lsb-release \
+    # 添加 pgdg 官方源以确保能装上最新的 PG15
+    && echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add - \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-15 postgresql-contrib-15 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 初始化 PostgreSQL 数据目录并配置凭据
+USER postgres
+RUN /etc/init.d/postgresql start \
+    && psql --command "CREATE USER postgres WITH SUPERUSER PASSWORD 'postgres';" \
+    && createdb -O postgres binancebot \
+    && /etc/init.d/postgresql stop
+# 允许本地密码连接
+RUN echo "host all  all    0.0.0.0/0  md5" >> /etc/postgresql/15/main/pg_hba.conf \
+    && echo "listen_addresses='*'" >> /etc/postgresql/15/main/postgresql.conf
+
+# 3. 设置后端应用
+USER root
+WORKDIR /app
+COPY requirements.txt .
+# 使用虚拟环境，避免污染系统 site-packages
+RUN python -m venv /app/venv && \
+    /app/venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN mkdir -p /app/state /app/logs
+
+# 4. 拷贝前端静态产物并配置 Nginx
+COPY --from=frontend-builder /build/dist /var/www/html
+COPY frontend/nginx.conf /etc/nginx/sites-available/default
+RUN rm -rf /etc/nginx/sites-enabled/default && \
+    ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+
+# 5. 配置 Supervisor 进程管理
+COPY monolith/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# 6. 配置启动脚本，用于在启动时执行 Alembic 数据库迁移
+COPY monolith/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# 暴露唯一的 Web/API 端口
+EXPOSE 80
+
+# 启动 Supervisord (内部拉起 Nginx, Redis, Postgres, Uvicorn)
+ENTRYPOINT ["/app/entrypoint.sh"]
