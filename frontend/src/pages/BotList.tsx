@@ -55,6 +55,19 @@ export default function BotList() {
         }
     };
 
+    const handlePanicClose = async (id: number) => {
+        try {
+            const response = await api.post(`/bots/${id}/panic-close`);
+            if (response.data?.status === "success") {
+                refetch();
+            }
+        } catch (error: any) {
+            console.error("平仓失败", error);
+            const msg = error.response?.data?.detail || "发生未知错误";
+            alert("平仓失败: " + msg);
+        }
+    };
+
     const handleDelete = async (id: number) => {
         const botToDelete = bots.find(b => b.id === id);
         if (!botToDelete) return;
@@ -133,6 +146,7 @@ export default function BotList() {
                             onStop={handleStop}
                             onDelete={handleDelete}
                             onViewDetails={(id) => navigate(`/bots/${id}`)}
+                            onPanicClose={handlePanicClose}
                         />
                     ))}
                 </div>

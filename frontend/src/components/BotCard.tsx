@@ -1,4 +1,5 @@
-import { Play, Square, AlertCircle, Info, Trash2, Cpu } from "lucide-react";
+import { Play, Square, AlertCircle, Info, Trash2, Cpu, Flame, Loader2 } from "lucide-react";
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -19,9 +20,11 @@ interface BotCardProps {
     onStop: (id: number) => void;
     onDelete: (id: number) => void;
     onViewDetails: (id: number) => void;
+    onPanicClose?: (id: number) => Promise<void>;
 }
 
-export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails }: BotCardProps) {
+export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails, onPanicClose }: BotCardProps) {
+    const [isPanicking, setIsPanicking] = useState(false);
     const botStatus = String(bot.status).toUpperCase();
     const isRunning = botStatus === "RUNNING";
     const isError = botStatus === "ERROR";
@@ -162,6 +165,23 @@ export function BotCard({ bot, onStart, onStop, onDelete, onViewDetails }: BotCa
                             title="启动"
                         >
                             <Play className="w-4 h-4" />
+                        </button>
+                    )}
+
+                    {isRunning && onPanicClose && (
+                        <button
+                            onClick={async () => {
+                                const confirmed = window.confirm(`🔥 🚨 极高危操作警告 🚨 🔥\n\n确定要对 ${bot.name} (${bot.symbol}) 立即执行【一键平仓】吗？\n该操作会强制撤销所有网格挂单并市价抛售全部 Base Asset。此操作不可逆！`);
+                                if (!confirmed) return;
+                                setIsPanicking(true);
+                                await onPanicClose(bot.id);
+                                setIsPanicking(false);
+                            }}
+                            disabled={isPanicking}
+                            className="p-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-colors disabled:opacity-50"
+                            title="一键平仓 (Panic Close)"
+                        >
+                            {isPanicking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Flame className="w-4 h-4" />}
                         </button>
                     )}
 

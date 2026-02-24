@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
     ChevronLeft,
@@ -6,7 +7,9 @@ import {
     TrendingUp,
     History,
     LayoutGrid,
-    Zap
+    Zap,
+    Flame,
+    Loader2
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { LiveGridMonitor } from "@/components/LiveGridMonitor";
@@ -15,8 +18,9 @@ import { cn } from "@/lib/utils";
 export default function BotDetail() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const [isPanicking, setIsPanicking] = useState(false);
 
-    const { data: bot, isLoading } = useQuery({
+    const { data: bot, isLoading, refetch } = useQuery({
         queryKey: ["bot", id],
         queryFn: async () => {
             const resp = await api.get(`/bots/${id}`);
@@ -30,8 +34,26 @@ export default function BotDetail() {
             const resp = await api.get(`/bots/${id}/trades`);
             return resp.data;
         },
-        refetchInterval: 15000, // 每 15 秒静默刷新一次
+        refetchInterval: 15000,
     });
+
+    const handlePanicClose = async () => {
+        const confirmed = window.confirm(`🔥 🚨 极高危操作警告 🚨 🔥\n\n确定要对 ${bot?.name} (${bot?.symbol}) 立即执行【一键平仓】吗？\n该操作会强制撤销所有网格挂单并市价抛售全部 Base Asset。此操作不可逆！`);
+        if (!confirmed) return;
+        setIsPanicking(true);
+        try {
+            const response = await api.post(`/bots/${id}/panic-close`);
+            if (response.data?.status === "success") {
+                refetch();
+            }
+        } catch (error: any) {
+            console.error("平仓失败", error);
+            const msg = error.response?.data?.detail || "发生未知错误";
+            alert("平仓失败: " + msg);
+        } finally {
+            setIsPanicking(false);
+        }
+    };
 
     if (isLoading) {
         return (
@@ -69,6 +91,16 @@ export default function BotDetail() {
                 </div>
 
                 <div className="flex items-center gap-3">
+                    {bot.status?.toUpperCase() === 'RUNNING' && (
+                        <button
+                            onClick={handlePanicClose}
+                            disabled={isPanicking}
+                            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg shadow-red-500/20 font-bold transition-all disabled:opacity-50"
+                        >
+                            {isPanicking ? <Loader2 className="w-5 h-5 animate-spin" /> : <Flame className="w-5 h-5" />}
+                            一键平仓
+                        </button>
+                    )}
                     <div className="px-4 py-2 bg-card border border-border rounded-xl">
                         <p className="text-[10px] text-muted-foreground uppercase font-bold">运行状态</p>
                         <p className="text-sm font-bold">{bot.status?.toUpperCase() === 'RUNNING' ? '运行中' : bot.status?.toUpperCase() === 'STOPPED' ? '已停止' : '空闲'}</p>
