@@ -137,6 +137,35 @@ async def stop_bot(
     else:
         return {"msg": "Bot 引擎中未发现活跃运行态，已强制重置数据库状态为停止"}
 
+@router.post("/{bot_id}/panic-close")
+async def panic_close_bot(
+    bot_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """一键平仓：高精度清算全部挂单并市价抛售标的底仓"""
+    query = select(BotConfig).where(BotConfig.id == bot_id, BotConfig.user_id == current_user.id)
+    result = await db.execute(query)
+    bot = result.scalar_one_or_none()
+    
+    if not bot:
+        raise HTTPException(status_code=404, detail="未找到该机器人")
+        
+    result_data = await strategy_manager.panic_close_bot(bot.id)
+    
+    # 将数据库状态标记为 STOPPED
+    bot.status = BotStatus.STOPPED
+    await db.commit()
+    
+    # 按照清算结果返回状态
+    if result_data.get("status") == "success":
+        return result_data
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=result_data.get("message", "一键平仓执行失败，请检查日志。")
+        )
+
 @router.get("/{bot_id}", response_model=BotConfigResponse)
 async def get_bot(
     bot_id: int,

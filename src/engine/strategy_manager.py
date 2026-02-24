@@ -151,6 +151,29 @@ class StrategyManager:
             
         return True
 
+    async def panic_close_bot(self, bot_id: int) -> dict[str, any]:
+        """
+        触发机器人的一键平仓。
+        首先通过策略的专属方法安全撤单和清算可用余额，然后安全卸载其运行协程。
+        """
+        bot_info = self._active_bots.get(bot_id)
+        if not bot_info:
+            logger.warning("Bot [%d] 不在运行状态中，无法执行平仓", bot_id)
+            return {"status": "error", "message": "Bot 不在运行状态中"}
+        
+        logger.warning("🚨 引擎正在强平 Bot [%d]...", bot_id)
+        strategy: BaseStrategy = bot_info["strategy"]
+        
+        # 强平逻辑
+        if hasattr(strategy, "panic_close"):
+            result = await strategy.panic_close()
+        else:
+            result = {"status": "error", "message": "该策略类型暂不支持一键平仓"}
+            
+        # 无论清盘由于精度或市价等原因有没有完全清算成功，机器人本身都必须立刻挂起下线
+        await self.stop_bot(bot_id)
+        return result
+
     async def stop_all_bots(self) -> None:
         """全局资源回收 (系统退出时触发)"""
         active_ids = list(self._active_bots.keys())
