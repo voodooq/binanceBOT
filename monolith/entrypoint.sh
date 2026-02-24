@@ -7,8 +7,8 @@ echo "Fixing PostgreSQL mount permissions..."
 chown -R postgres:postgres /var/lib/postgresql/15/main
 chmod 700 /var/lib/postgresql/15/main
 
-# 如果挂载卷是非常空的，我们还要触发一下初始化
-if [ -z "$(ls -A /var/lib/postgresql/15/main)" ]; then
+# 如果挂载卷内没有 PG_VERSION 文件，说明还不是一个有效的数据库集群，必须初始化
+if [ ! -s "/var/lib/postgresql/15/main/PG_VERSION" ]; then
     echo "Initializing empty PostgreSQL data directory..."
     su - postgres -c "/usr/lib/postgresql/15/bin/initdb -D /var/lib/postgresql/15/main"
     # 初始化后把我们之前准备好的配置文件写进去
