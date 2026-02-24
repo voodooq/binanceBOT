@@ -40,8 +40,14 @@ class StrategyManager:
         bot_id = bot_config.id
         
         if bot_id in self._active_bots:
-            logger.warning("⚠️ Bot [%d] 已经在运行中，请勿重复启动", bot_id)
-            return False
+            task = self._active_bots[bot_id]["task"]
+            if not task.done():
+                logger.warning("⚠️ Bot [%d] 已经在运行中，请勿重复启动", bot_id)
+                # 这种情况下允许前端刷新状态，抛出特定标识供前端识别
+                return False
+            else:
+                logger.warning("🧹 发现 Bot [%d] 的僵尸任务 (已结束但未清理字典)，执行强制清理", bot_id)
+                self._active_bots.pop(bot_id, None)
 
         strategy_class = self._strategy_registry.get(bot_config.strategy_type)
         if not strategy_class:
@@ -109,12 +115,20 @@ class StrategyManager:
             # Todo: 此处可触发数据库状态回写 BotStatus.ERROR
         finally:
             logger.info("🧹 Bot [%d] 执行清理程序...", bot_id)
-            await strategy.stop()
-            await client.disconnect()
+            try:
+                await strategy.stop()
+            except Exception as e:
+                logger.error("Bot [%d] stop 钩子异常: %s", bot_id, e)
+                
+            try:
+                await client.disconnect()
+            except Exception as e:
+                logger.error("Bot [%d] client 释放异常: %s", bot_id, e)
             
-            # 从管理器卸载本任务
+            # 从管理器卸载本任务，非常关键
             if bot_id in self._active_bots:
-                self._active_bots.pop(bot_id)
+                self._active_bots.pop(bot_id, None)
+                logger.info("🗑️ Bot [%d] 的运行态数据已彻底从系统擦除", bot_id)
 
     async def stop_bot(self, bot_id: int) -> bool:
         """

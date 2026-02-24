@@ -122,10 +122,18 @@ class BinanceClient:
 
     async def disconnect(self) -> None:
         """断开连接，清理资源"""
+        if self._socketManager:
+            # 必须显式关闭 SocketManager，否则残留的后台线程和旧 asyncio Task 会引发冲突
+            try:
+                self._socketManager.stop()
+            except Exception as e:
+                logger.error("清理旧 SocketManager 失败: %s", e)
+            self._socketManager = None
+
         if self._client:
             await self._client.close_connection()
             self._client = None
-            logger.info("🔌 已断开币安连接")
+            logger.info("🔌 已断开币安连接并清理 Socket 资源")
 
     def _ensureConnected(self) -> AsyncClient:
         """检查客户端是否已连接，未连接则抛出异常"""
@@ -648,6 +656,7 @@ class BinanceClient:
 
         retry_count = 0
         while True:
+            tradeSocket = None
             try:
                 # 检查底层 Client 是否已断开，若断开则尝试重建
                 if not await self._is_client_alive():
@@ -656,6 +665,7 @@ class BinanceClient:
                     await self.connect()
                     retry_count = 0
 
+                # 每次进循环务必重新获取最新的 socket_manager 下的流
                 tradeSocket = self._socketManager.symbol_ticker_socket(symbol=symbol)
                 async with tradeSocket as stream:
                     logger.info("🟢 %s 行情流已挂载", self._settings.tradingSymbol)
@@ -672,20 +682,20 @@ class BinanceClient:
 
                             if "c" in msg:
                                 price = Decimal(msg["c"])
-                                # NOTE: 使用 create_task 异步处理回调，防止下单逻辑延迟导致接收流超时
                                 asyncio.create_task(onPrice(price))
 
                         except asyncio.TimeoutError:
-                            logger.warning("⚠️ %s 行情流 10s 无响应 (静默掉线)，尝试重连...", self._settings.tradingSymbol)
+                            logger.warning("⚠️ %s 行情流 10s 无响应 (静默掉线)，尝试跳出重连...", self._settings.tradingSymbol)
+                            # 跳出内层 while 循环，重新获取 socket 建立握手
                             break
                             
             except asyncio.CancelledError:
-                logger.info("🛑 %s 行情流取消", self._settings.tradingSymbol)
+                logger.info("🛑 %s 行情流主动取消退出", self._settings.tradingSymbol)
                 raise
             except Exception as e:
                 retry_count += 1
                 wait_time = min(30, 2 + retry_count * 2)
-                logger.error("❌ %s 行情流异常: %s (%ds 后重试)", self._settings.tradingSymbol, e, wait_time)
+                logger.error("❌ %s 行情流异常退出: %s (%ds 后重试)", self._settings.tradingSymbol, e, wait_time)
                 await asyncio.sleep(wait_time)
 
     async def startUserDataStream(
@@ -702,6 +712,7 @@ class BinanceClient:
 
         retry_count = 0
         while True:
+            userSocket = None
             try:
                 # 检查底层 Client 状态
                 if not await self._is_client_alive():
@@ -730,14 +741,14 @@ class BinanceClient:
                                 logger.info("💰 资产更新 (WS): %s", self._getBalancesSummary())
 
                         except asyncio.TimeoutError:
-                            logger.warning("⚠️ 用户数据流 180s 无响应 (心跳中断)，强制重连...")
+                            logger.warning("⚠️ 用户数据流 180s 无响应 (心跳中断)，强制跳出重连...")
                             break
 
             except asyncio.CancelledError:
-                logger.info("🛑 用户数据流取消")
+                logger.info("🛑 用户数据流主动取消退出")
                 raise
             except Exception as e:
                 retry_count += 1
                 wait_time = min(60, 5 + retry_count * 5)
-                logger.error("❌ 用户数据流异常: %s (%ds 后重试)", e, wait_time)
+                logger.error("❌ 用户数据流异常退出: %s (%ds 后重试)", e, wait_time)
                 await asyncio.sleep(wait_time)
