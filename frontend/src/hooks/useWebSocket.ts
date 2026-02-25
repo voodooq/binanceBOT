@@ -40,7 +40,7 @@ export function useWebSocket(onMessage?: (data: any) => void) {
             }, delay);
         };
 
-        socket.onerror = (err) => {
+        socket.onerror = () => {
             socket.close();
         };
 

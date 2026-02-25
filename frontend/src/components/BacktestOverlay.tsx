@@ -2,8 +2,6 @@ import { useState } from "react";
 import {
     Play,
     X,
-    TrendingUp,
-    TrendingDown,
     Activity,
     BarChart3,
     Calendar,
