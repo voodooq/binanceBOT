@@ -4,7 +4,7 @@ from typing import Dict, Type
 
 from src.exchanges.binance_client import BinanceClient, ClientConfig
 from src.models.bot import BotConfig, BotStatus, StrategyType
-from src.models.key import ApiKey
+from src.models.api_key import ApiKey
 from src.strategies.base_strategy import BaseStrategy
 from src.services.crypto_service import decrypt_api_secret
 from sqlalchemy import select
