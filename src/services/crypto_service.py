@@ -60,6 +60,9 @@ class CryptoService:
         信封加密便捷方法：先用主密钥解密用户 DEK，再用 DEK 加密目标秘钥。
         用于绑定 API Key 时加密用户的 API Secret。
         """
+        if not encrypted_dek_b64:
+            raise ValueError("Invalid DEK: encrypted_dek_b64 is empty")
+            
         # 1. 用主密钥解开用户的 DEK
         try:
             dek_bytes = self._master_fernet.decrypt(encrypted_dek_b64.encode())
