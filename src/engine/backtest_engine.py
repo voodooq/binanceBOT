@@ -23,6 +23,8 @@ class MockBinanceClient:
         self.current_price = Decimal("0")
         self._pricePrecision = 4
         self._quantityPrecision = 4
+        # NOTE: GridStrategy.__init__ 会引用 client._rateLimiter，回测时不需要限速
+        self._rateLimiter = None
 
     def _ensureConnected(self):
         return self
