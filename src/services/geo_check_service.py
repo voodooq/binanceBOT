@@ -36,8 +36,9 @@ class GeoCheckService:
         @return (是否合规, 提示信息)
         """
         from src.core.config import settings
-        if settings.IGNORE_GEO_CHECK:
-            return True, "IgnoreGeoCheck is enabled"
+        # 在测试网模式下，或者显式开启忽略开关时，跳过地理位置检查
+        if settings.BINANCE_TESTNET or settings.IGNORE_GEO_CHECK:
+            return True, "Geo-check bypassed (Testnet or IgnoreEnabled)"
 
         info = await self.get_ip_info(proxy)
         if not info:
