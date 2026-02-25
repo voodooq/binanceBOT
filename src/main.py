@@ -14,9 +14,9 @@ async def lifespan(app: FastAPI):
     await redis_bus.start()
     
     # [P4] 服务启动时持久化恢复所有 RUNNING 机器人
-    from src.db.session import SessionLocal
+    from src.db.session import AsyncSessionLocal
     from src.engine.strategy_manager import strategy_manager
-    async with SessionLocal() as db:
+    async with AsyncSessionLocal() as db:
         await strategy_manager.init_and_resume_all(db)
     
     yield
