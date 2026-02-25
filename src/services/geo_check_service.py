@@ -35,6 +35,10 @@ class GeoCheckService:
         检查当前环境是否合规。
         @return (是否合规, 提示信息)
         """
+        from src.core.config import settings
+        if settings.IGNORE_GEO_CHECK:
+            return True, "IgnoreGeoCheck is enabled"
+
         info = await self.get_ip_info(proxy)
         if not info:
             # 如果接口失效，我们选择警告通过。因为不合规在下单时币安也会返回错误。
