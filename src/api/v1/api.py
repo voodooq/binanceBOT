@@ -1,3 +1,4 @@
+from fastapi import APIRouter
 from src.api.v1 import keys, auth, bots, dashboard, market, ws, backtest, notifications
 
 api_router = APIRouter()
