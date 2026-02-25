@@ -115,10 +115,35 @@ class RateLimiter:
             refillRate=orderCapacity / 10.0,
         )
 
+        # [P3] 异常触发的硬熔断：记录熔断结束的时间戳 (0 表示正常)
+        self._hardCircuitBreakerUntil: float = 0.0
+
         logger.info(
             "🚦 速率限制器初始化: 权重=%d/分钟, 订单=%d/10秒",
             weightCapacity, orderCapacity,
         )
+
+    def triggerHardCircuitBreaker(self, duration: int = 60):
+        """
+        触发硬熔断，由外部 (如 BinanceClient 捕获 429) 调用。
+        @param duration 熔断持续时间 (秒)，默认 60 秒
+        """
+        self._hardCircuitBreakerUntil = time.time() + duration
+        logger.critical("🚨 [RateLimiter] 硬熔断已激活! 预计在 %d 秒后尝试恢复", duration)
+
+    @property
+    def isHardCircuitBroken(self) -> bool:
+        """检查当前是否处于硬熔断期内"""
+        if self._hardCircuitBreakerUntil == 0:
+            return False
+        
+        if time.time() < self._hardCircuitBreakerUntil:
+            return True
+        
+        # 熔断时间已过，自动恢复
+        self._hardCircuitBreakerUntil = 0
+        logger.info("🟢 [RateLimiter] 硬熔断冷却结束，系统尝试恢复运行")
+        return False
 
     async def acquireWeight(self, weight: int = 1) -> None:
         """
@@ -126,6 +151,10 @@ class RateLimiter:
 
         @param weight 该请求的权重值（不同 endpoint 权重不同）
         """
+        if self.isHardCircuitBroken:
+            # 如果处于硬熔断期，直接抛出频率限制异常，强制外部重试器检测到并进行长等待
+            raise ApiError(code=-1003, message="Rate limit exceeded (Hard Circuit Breaker active)")
+            
         await self.weightBucket.acquire(weight)
 
     async def acquireOrderSlot(self) -> None:

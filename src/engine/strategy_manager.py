@@ -4,10 +4,17 @@ from typing import Dict, Type
 
 from src.exchanges.binance_client import BinanceClient, ClientConfig
 from src.models.bot import BotConfig, BotStatus, StrategyType
+from src.models.key import ApiKey
 from src.strategies.base_strategy import BaseStrategy
+from src.services.crypto_service import decrypt_api_secret
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 # Import concrete strategies when they are ready
 from src.strategies.grid_strategy import GridStrategy
+from src.strategies.hedge_strategy import HedgeStrategy
+from src.services.geo_check_service import geo_check_service
+from src.engine.proxy_scheduler import proxy_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +31,7 @@ class StrategyManager:
         # 策略类型 -> 策略实现类的映射表
         self._strategy_registry: Dict[StrategyType, Type[BaseStrategy]] = {
             StrategyType.GRID: GridStrategy,
+            StrategyType.HEDGE: HedgeStrategy,
         }
 
     def register_strategy(self, strategy_type: StrategyType, strategy_class: Type[BaseStrategy]):
@@ -56,14 +64,28 @@ class StrategyManager:
 
         try:
             # 1. 初始化客户端连接池代理/凭据
-            # 从 parameters 中提取单个策略的代理偏好，如无则为 None
-            proxy = bot_config.parameters.get("proxy", None)
+            # V3.0 多租户架构：优先使用机器人参数中的固定代理，如无则由调度器按最小负载分配
+            proxy = bot_config.parameters.get("proxy")
+            is_auto_proxy = False
+            
+            if not proxy:
+                proxy = proxy_scheduler.get_best_proxy()
+                is_auto_proxy = True
+            
+            # [P3] 地域合规预检：防止由于 IP 违规导致币安账号风险 (封号/限制)
+            is_ok, reason = await geo_check_service.is_compliant(proxy)
+            if not is_ok:
+                logger.error("🛑 Bot [%d] 启动被合规引擎拦截: %s", bot_id, reason)
+                if is_auto_proxy:
+                    proxy_scheduler.release_proxy(proxy)
+                return False
             
             client_config = ClientConfig(
                 apiKey=api_key_str,
                 apiSecret=api_secret_str,
                 useTestnet=bot_config.is_testnet,
                 tradingSymbol=bot_config.symbol,
+                api_key_id=bot_config.api_key_id,
                 proxy=proxy
             )
             
@@ -86,9 +108,11 @@ class StrategyManager:
             self._active_bots[bot_id] = {
                 "task": task,
                 "strategy": strategy_instance,
-                "client": client
+                "client": client,
+                "proxy": proxy,
+                "is_auto_proxy": is_auto_proxy
             }
-            logger.info("🟢 Bot [%d] 启动成功 (策略: %s, 币种: %s)", bot_id, bot_config.strategy_type.value, bot_config.symbol)
+            logger.info("🟢 Bot [%d] 启动成功 (策略: %s, 代理: %s)", bot_id, bot_config.strategy_type.value, proxy or "DIRECT")
             return True
 
         except Exception as e:
@@ -125,9 +149,12 @@ class StrategyManager:
             except Exception as e:
                 logger.error("Bot [%d] client 释放异常: %s", bot_id, e)
             
-            # 从管理器卸载本任务，非常关键
+            # 从管理器卸载本任务
             if bot_id in self._active_bots:
-                self._active_bots.pop(bot_id, None)
+                bot_info = self._active_bots.pop(bot_id, None)
+                # 释放代理负载计数
+                if bot_info and bot_info.get("is_auto_proxy"):
+                    proxy_scheduler.release_proxy(bot_info.get("proxy"))
                 logger.info("🗑️ Bot [%d] 的运行态数据已彻底从系统擦除", bot_id)
 
     async def stop_bot(self, bot_id: int) -> bool:
@@ -184,6 +211,57 @@ class StrategyManager:
         stop_tasks = [self.stop_bot(bot_id) for bot_id in active_ids]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         logger.info("✔️ 所有机器人安全停止完毕")
+
+    async def init_and_resume_all(self, db_session) -> None:
+        """
+        [P4] 自动恢复自愈逻辑。
+        从数据库加载所有标记为 RUNNING 的机器人并尝试拉起。
+        """
+        logger.info("🎬 [StrategyManager] 启动持久化自愈检测，搜索运行中的机器人...")
+        
+        # 查询所有活跃状态的机器人
+        stmt = select(BotConfig).where(BotConfig.status == BotStatus.RUNNING).options(selectinload(BotConfig.api_key))
+        result = await db_session.execute(stmt)
+        bots = result.scalars().all()
+        
+        if not bots:
+            logger.info("ℹ️ 未发现需要恢复的运行中机器人。")
+            return
+            
+        logger.info("🚀 发现 %d 个待恢复机器人，正在批量拉起...", len(bots))
+        
+        for bot in bots:
+            try:
+                # 检查是否重复拉起 (例如人工重启刚好撞在自动化钩子上)
+                if bot.id in self._active_bots:
+                    continue
+                
+                # 获取解密凭据
+                api_key = bot.api_key
+                if not api_key:
+                    logger.error("❌ Bot [%d] 缺少 API Key 关联，跳过恢复", bot.id)
+                    continue
+                    
+                secret = decrypt_api_secret(api_key.encrypted_secret)
+                
+                # 触发异步启动
+                success = await self.start_bot(bot, api_key.api_key, secret)
+                if success:
+                    logger.info("✅ Bot [%d] (%s) 恢复成功", bot.id, bot.name)
+                    # [P4] 发送系统自愈报告
+                    notification_service.send_notification(
+                        user_id=bot.user_id,
+                        title="♻️ 系统自动恢复报告",
+                        message=f"服务器重启后，机器人 [{bot.name}] ({bot.symbol}) 已自动恢复运行。\n状态: RUNNING | 策略: {bot.strategy_type.upper()}",
+                        level=NotificationLevel.SUCCESS
+                    )
+                else:
+                    logger.error("❌ Bot [%d] (%s) 恢复失败", bot.id, bot.name)
+                
+                await asyncio.sleep(0.5) # 避锋
+                
+            except Exception as e:
+                logger.error("💥 恢复 Bot [%d] 时发生致命错误: %s", bot.id, e)
 
 # 全局单例管理器
 strategy_manager = StrategyManager()

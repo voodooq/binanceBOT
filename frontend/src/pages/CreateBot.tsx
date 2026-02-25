@@ -12,8 +12,12 @@ import {
     Info,
     TrendingUp,
     Shield,
-    Activity
+    Activity,
+    ArrowRightLeft,
+    Layers,
+    Play
 } from "lucide-react";
+import { BacktestOverlay } from "@/components/BacktestOverlay";
 
 const TOP_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -42,16 +46,25 @@ export default function CreateBot() {
         total_investment: 100,
         exchange: "Binance", // Added default to show in preview
         parameters: {
+            // 网格参数
             grid_lower_price: "",
             grid_upper_price: "",
             grid_count: 20,
             grid_investment_per_grid: 10,
+
+            // 对冲参数 (P3)
+            target_notional: 1000,
+            rebalance_threshold: 0.005,
+
+            // 通用风控
             reserve_ratio: 0.05,
             adaptive_mode: true,
             stop_loss_percent: 0.15,
             take_profit_amount: 100,
         }
     });
+
+    const [isBacktestOpen, setIsBacktestOpen] = useState(false);
 
     // 实时获取选中交易对的价格
     const { data: marketData, isLoading: isPriceLoading } = useQuery({
@@ -196,8 +209,31 @@ export default function CreateBot() {
                     <section className="p-6 rounded-2xl bg-card border border-border shadow-sm space-y-4">
                         <h3 className="text-sm font-bold uppercase text-muted-foreground flex items-center gap-2">
                             <Settings2 className="w-4 h-4" />
-                            基础信息
+                            基础信息与策略选择
                         </h3>
+
+                        <div className="flex p-1 bg-muted rounded-xl gap-1">
+                            <button
+                                type="button"
+                                onClick={() => setFormData({ ...formData, strategy_type: "grid" })}
+                                className={cn(
+                                    "flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all",
+                                    formData.strategy_type === "grid" ? "bg-card shadow-sm text-primary" : "text-muted-foreground hover:bg-card/50"
+                                )}
+                            >
+                                <Layers className="w-3.5 h-3.5" /> 等差网格
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setFormData({ ...formData, strategy_type: "hedge" })}
+                                className={cn(
+                                    "flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all",
+                                    formData.strategy_type === "hedge" ? "bg-card shadow-sm text-primary" : "text-muted-foreground hover:bg-card/50"
+                                )}
+                            >
+                                <ArrowRightLeft className="w-3.5 h-3.5" /> 期现对冲
+                            </button>
+                        </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
@@ -271,103 +307,140 @@ export default function CreateBot() {
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-sm font-bold uppercase text-muted-foreground flex items-center gap-2">
                                 <Zap className="w-4 h-4" />
-                                策略深度参数 (网格策略)
+                                {formData.strategy_type === "grid" ? "策略深度参数 (网格策略)" : "策略深度参数 (期现对冲)"}
                             </h3>
-                            {/* 一键推荐 */}
-                            <div className="flex gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => applyStrategy("conservative")}
-                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 transition-colors flex items-center gap-1"
-                                >
-                                    <Shield className="w-3 h-3" /> 保守型
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => applyStrategy("moderate")}
-                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors flex items-center gap-1"
-                                >
-                                    <Activity className="w-3 h-3" /> 稳健型
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => applyStrategy("aggressive")}
-                                    className="px-3 py-1 text-[10px] font-bold rounded-full bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors flex items-center gap-1"
-                                >
-                                    <TrendingUp className="w-3 h-3" /> 激进型
-                                </button>
-                            </div>
+                            {formData.strategy_type === "grid" && (
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => applyStrategy("conservative")}
+                                        className="px-3 py-1 text-[10px] font-bold rounded-full bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 transition-colors flex items-center gap-1"
+                                    >
+                                        <Shield className="w-3 h-3" /> 保守型
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => applyStrategy("moderate")}
+                                        className="px-3 py-1 text-[10px] font-bold rounded-full bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors flex items-center gap-1"
+                                    >
+                                        <Activity className="w-3 h-3" /> 稳健型
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => applyStrategy("aggressive")}
+                                        className="px-3 py-1 text-[10px] font-bold rounded-full bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors flex items-center gap-1"
+                                    >
+                                        <TrendingUp className="w-3 h-3" /> 激进型
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">网格上限价格</label>
-                                <input
-                                    type="number"
-                                    required
-                                    value={formData.parameters.grid_upper_price}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_upper_price: e.target.value } })}
-                                    className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">网格下限价格</label>
-                                <input
-                                    type="number"
-                                    required
-                                    value={formData.parameters.grid_lower_price}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_lower_price: e.target.value } })}
-                                    className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
-                                />
-                            </div>
-                        </div>
+                        {formData.strategy_type === "grid" ? (
+                            <>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">网格上限价格</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={formData.parameters.grid_upper_price}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_upper_price: e.target.value } })}
+                                            className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">网格下限价格</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={formData.parameters.grid_lower_price}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_lower_price: e.target.value } })}
+                                            className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
+                                        />
+                                    </div>
+                                </div>
 
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">网格密度 (格数)</label>
-                                <input
-                                    type="number"
-                                    value={formData.parameters.grid_count}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_count: parseInt(e.target.value) } })}
-                                    className="w-full px-4 py-2 bg-background border border-border rounded-lg"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">单格投入 (USDT)</label>
-                                <input
-                                    type="number"
-                                    value={formData.parameters.grid_investment_per_grid}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_investment_per_grid: parseFloat(e.target.value) } })}
-                                    className="w-full px-4 py-2 bg-background border border-border rounded-lg"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">止损比例 (%)</label>
-                                <input
-                                    type="number"
-                                    step="0.01"
-                                    value={formData.parameters.stop_loss_percent}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, stop_loss_percent: parseFloat(e.target.value) } })}
-                                    className="w-full px-4 py-2 bg-background border border-border rounded-lg"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase ml-1">自适应模式</label>
-                                <select
-                                    value={formData.parameters.adaptive_mode ? "true" : "false"}
-                                    onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, adaptive_mode: e.target.value === "true" } })}
-                                    className="w-full px-4 py-2 bg-background border border-border rounded-lg"
-                                >
-                                    <option value="true">开启 (推荐)</option>
-                                    <option value="false">关闭</option>
-                                </select>
-                            </div>
-                        </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">网格密度 (格数)</label>
+                                        <input
+                                            type="number"
+                                            value={formData.parameters.grid_count}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_count: parseInt(e.target.value) } })}
+                                            className="w-full px-4 py-2 bg-background border border-border rounded-lg"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">单格投入 (USDT)</label>
+                                        <input
+                                            type="number"
+                                            value={formData.parameters.grid_investment_per_grid}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, grid_investment_per_grid: parseFloat(e.target.value) } })}
+                                            className="w-full px-4 py-2 bg-background border border-border rounded-lg"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">止损比例 (%)</label>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={formData.parameters.stop_loss_percent}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, stop_loss_percent: parseFloat(e.target.value) } })}
+                                            className="w-full px-4 py-2 bg-background border border-border rounded-lg"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">自适应模式</label>
+                                        <select
+                                            value={formData.parameters.adaptive_mode ? "true" : "false"}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, adaptive_mode: e.target.value === "true" } })}
+                                            className="w-full px-4 py-2 bg-background border border-border rounded-lg"
+                                        >
+                                            <option value="true">开启 (推荐)</option>
+                                            <option value="false">关闭</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between items-center ml-1">
+                                            <label className="text-xs font-bold uppercase">对冲名义价值 (USDT)</label>
+                                            <span className="text-[10px] text-primary font-bold">现货+合约双向占用</span>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={formData.parameters.target_notional}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, target_notional: parseFloat(e.target.value) } })}
+                                            className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold uppercase ml-1">重平衡阈值 (Delta)</label>
+                                        <select
+                                            value={formData.parameters.rebalance_threshold}
+                                            onChange={(e) => setFormData({ ...formData, parameters: { ...formData.parameters, rebalance_threshold: parseFloat(e.target.value) } })}
+                                            className="w-full px-4 py-3 bg-background border border-border rounded-xl focus:ring-2 focus:ring-primary/20"
+                                        >
+                                            <option value={0.003}>0.3% (极灵敏)</option>
+                                            <option value={0.005}>0.5% (推荐)</option>
+                                            <option value={0.01}>1.0% (节省手续费)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </>
+                        )}
 
                         <div className="p-4 bg-muted/50 rounded-xl flex gap-3 text-xs text-muted-foreground leading-relaxed italic">
                             <Info className="w-4 h-4 shrink-0 text-primary mt-0.5" />
                             <span>
-                                等差网格逻辑：将在上限与下限之间均匀分布买单。价格每下跌一个步长触发一次买入，并自动挂出利润卖单。
+                                {formData.strategy_type === "grid"
+                                    ? "等差网格逻辑：将在上限与下限之间均匀分布买单。价格每下跌一个步长触发一次买入，并自动挂出利润卖单。"
+                                    : "期现对冲逻辑：同时购入现货并开启同等价值的 1x 做空合约，通过中性 Delta 赚取每 8 小时一次的资金费率（Funding Rate）。"}
                             </span>
                         </div>
                     </section>
@@ -475,6 +548,17 @@ export default function CreateBot() {
 
                         <div className="mt-8 space-y-3">
                             <button
+                                type="button"
+                                onClick={() => setIsBacktestOpen(true)}
+                                className="w-full py-3 border-2 border-primary/20 text-primary rounded-xl text-xs font-black flex items-center justify-center gap-2 hover:bg-primary/5 transition-all mb-4"
+                            >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                                启动历史拟合测试
+                            </button>
+
+                            <div className="h-px bg-border/50 w-full my-4" />
+
+                            <button
                                 type="submit"
                                 disabled={createMutation.isPending}
                                 className="w-full bg-primary text-primary-foreground py-4 rounded-xl font-bold hover:opacity-90 transition-all flex items-center justify-center gap-2"
@@ -494,6 +578,12 @@ export default function CreateBot() {
                     </section>
                 </div>
             </form>
+
+            <BacktestOverlay
+                isOpen={isBacktestOpen}
+                onClose={() => setIsBacktestOpen(false)}
+                botData={formData}
+            />
         </div>
     );
 }

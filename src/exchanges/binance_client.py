@@ -15,6 +15,7 @@ from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
 from src.utils.rate_limiter import RateLimiter
+from src.engine.stream_aggregator import stream_aggregator
 from src.utils.error_handler import (
     ApiError,
     NetworkError,
@@ -29,12 +30,20 @@ logger = logging.getLogger(__name__)
 BALANCE_STALE_TIMEOUT = 3600
 
 
-def _toBinanceApiError(e: BinanceAPIException) -> ApiError:
+def _toBinanceApiError(e: BinanceAPIException, rateLimiter: RateLimiter | None = None) -> ApiError:
     """
     将 python-binance 的异常转换为内部异常体系。
     根据错误码映射到具体子类，便于 retryOnError 装饰器精确处理。
     """
     code = e.code
+    status = getattr(e, "status_code", 0)
+
+    # [P3] 核心熔断拦截：429 (Too Many Requests) 或 503 (Service Unavailable)
+    if status in (429, 418) or code == -1003:
+        if rateLimiter:
+            rateLimiter.triggerHardCircuitBreaker(duration=60)
+            logger.critical("🚨 [BinanceClient] 收到币安频率限制 (429/1003)，已激活 60s 硬熔断保护")
+    
     if code == -2010:
         return InsufficientBalanceError(e.message)
     if code == -1013:
@@ -48,6 +57,7 @@ class ClientConfig:
     apiSecret: str
     useTestnet: bool
     tradingSymbol: str
+    api_key_id: int = 0
     proxy: str | None = None
 
 class BinanceClient:
@@ -159,7 +169,7 @@ class BinanceClient:
             self._timeOffset = serverTime["serverTime"] - localTime
             logger.info("🕐 时间同步完成，偏移量: %d ms", self._timeOffset)
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     # ==================================================
     # 交易对信息
@@ -208,7 +218,7 @@ class BinanceClient:
             logger.warning("⚠️ 未找到交易对 %s 的精度信息，使用默认值", self._settings.tradingSymbol)
 
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     def formatPrice(self, price: Decimal) -> str:
         """将价格截断到交易对允许的精度"""
@@ -238,7 +248,7 @@ class BinanceClient:
             account = await client.get_account()
             return account
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     async def getFreeBalance(self, asset: str = "USDT") -> Decimal:
         """
@@ -286,6 +296,57 @@ class BinanceClient:
             if free > 0:
                 items.append(f"{asset}: {free}")
         return ", ".join(items) if items else "无余额"
+
+    # ==================================================
+    # 合约 (Futures) API 扩展
+    # ==================================================
+
+    @retryOnError(maxRetries=3, baseDelay=2.0)
+    async def getFuturesAccountInfo(self) -> dict[str, Any]:
+        """获取 U 本位合约账户信息"""
+        client = self._ensureConnected()
+        try:
+            return await client.futures_account()
+        except BinanceAPIException as e:
+            raise _toBinanceApiError(e, self._rateLimiter)
+
+    async def getFuturesPosition(self, symbol: str) -> dict[str, Any]:
+        """获取特定交易对的合约持仓信息"""
+        client = self._ensureConnected()
+        try:
+            positions = await client.futures_position_information(symbol=symbol)
+            return positions[0] if positions else {}
+        except BinanceAPIException as e:
+            raise _toBinanceApiError(e, self._rateLimiter)
+
+    @retryOnError(maxRetries=2, baseDelay=1.0)
+    async def futuresCreateOrder(
+        self,
+        symbol: str,
+        side: str,
+        type: str,
+        quantity: Decimal,
+        price: Decimal | None = None,
+        **kwargs
+    ) -> dict[str, Any]:
+        """创建合约订单"""
+        client = self._ensureConnected()
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": type,
+            "quantity": self.formatQuantity(quantity),
+            **kwargs
+        }
+        if price:
+            params["price"] = self.formatPrice(price)
+            params["timeInForce"] = "GTC"
+
+        try:
+            await self._rateLimiter.acquireWeight(1)
+            return await client.futures_create_order(**params)
+        except BinanceAPIException as e:
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     # ==================================================
     # 下单操作
@@ -336,7 +397,7 @@ class BinanceClient:
             return order
 
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     @retryOnError(maxRetries=2, baseDelay=1.0)
     async def createMarketOrder(
@@ -378,7 +439,7 @@ class BinanceClient:
             logger.info("✅ 市价单成交: orderId=%s", order.get("orderId"))
             return order
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     # ==================================================
     # 撤单操作
@@ -408,7 +469,7 @@ class BinanceClient:
             if e.code == -2011:
                 logger.warning("⚠️ 订单 %s 已不存在或已成交", orderId)
                 return {"orderId": orderId, "status": "UNKNOWN"}
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     @retryOnError(maxRetries=2, baseDelay=1.0)
     async def cancelAllOrders(self) -> list[dict[str, Any]]:
@@ -428,7 +489,7 @@ class BinanceClient:
             if e.code == -2011:
                 logger.info("ℹ️ 当前账户无活跃挂单，无需撤销")
                 return []
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     async def nuke_all_orders(self, symbol: str | None = None) -> None:
         """
@@ -503,7 +564,7 @@ class BinanceClient:
             )
             return orders
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     @retryOnError(maxRetries=3, baseDelay=1.0)
     async def getOrderBook(self, limit: int = 5) -> dict[str, Any]:
@@ -524,7 +585,7 @@ class BinanceClient:
             )
             return book
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     async def getBidAskSpread(self) -> Decimal:
         """
@@ -584,7 +645,7 @@ class BinanceClient:
             logger.debug("获取 %d 根 %s K 线 (已缓存)", len(klines), interval)
             return klines
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     @retryOnError(maxRetries=2)
     async def getOpenOrdersCount(self) -> int:
@@ -599,7 +660,7 @@ class BinanceClient:
             )
             return len(orders)
         except BinanceAPIException as e:
-            raise _toBinanceApiError(e)
+            raise _toBinanceApiError(e, self._rateLimiter)
 
     async def getTotalPositionValue(self, currentPrice: Decimal = Decimal("0")) -> tuple[Decimal, Decimal]:
         """
@@ -645,114 +706,55 @@ class BinanceClient:
         onPrice: Any,
     ) -> None:
         """
-        启动实时成交价格 WebSocket 流。
-        包含断线重连和心跳/超时检测机制。
-
-        @param onPrice 价格回调函数: async def callback(price: Decimal) -> None
+        启动实时成交价格 WebSocket 流 (接入 P4 聚合器模式)。
         """
-        symbol = self._settings.tradingSymbol.lower()
+        symbol = self._settings.tradingSymbol
+        logger.info("📡 [Aggregator-Client] 正在向聚合器订阅行情: %s", symbol)
 
-        logger.info("📡 启动 %s 实时行情 WebSocket ...", self._settings.tradingSymbol)
-
-        retry_count = 0
-        while True:
-            tradeSocket = None
-            try:
-                # 检查底层 Client 是否已断开，若断开则尝试重建
-                if not await self._is_client_alive():
-                    logger.warning("🔄 发现底层 Session 已失效，尝试全量重建连接...")
-                    await self.disconnect()
-                    await self.connect()
-                    retry_count = 0
-
-                # 每次进循环务必重新获取最新的 socket_manager 下的流
-                tradeSocket = self._socketManager.symbol_ticker_socket(symbol=symbol)
-                async with tradeSocket as stream:
-                    logger.info("🟢 %s 行情流已挂载", self._settings.tradingSymbol)
-                    retry_count = 0
-                    while True:
-                        try:
-                            # 去除外层 wait_for 超时。如果交易对冷门（例如测试网），可能几分钟都没成交推送。
-                            # 币安底层的 python-binance 会利用 WebSocket 标准 Ping/Pong (每分钟) 维持 TCP 活性。
-                            # 若真正断网，底层 stream.recv() 会抛出 ConnectionClosed 异常，外层异常块能捕获重建。
-                            msg = await stream.recv()
-                            if msg is None: continue
-
-                            if "e" in msg and msg["e"] == "error":
-                                logger.error("WebSocket 内部错误: %s", msg)
-                                continue
-
-                            if "c" in msg:
-                                price = Decimal(msg["c"])
-                                asyncio.create_task(onPrice(price))
-
-                        except Exception as inner_e:
-                            logger.error("⚠️ %s 行情流接收阻塞报错: %s (连接被异常截断)，尝试跳出重连...", self._settings.tradingSymbol, inner_e)
-                            # 跳出内层 while 循环，重新获取 socket 建立握手
-                            break
-                            
-            except asyncio.CancelledError:
-                logger.info("🛑 %s 行情流主动取消退出", self._settings.tradingSymbol)
-                raise
-            except Exception as e:
-                retry_count += 1
-                wait_time = min(30, 2 + retry_count * 2)
-                logger.error("❌ %s 行情流异常退出: %s (%ds 后重试)", self._settings.tradingSymbol, e, wait_time)
-                await asyncio.sleep(wait_time)
+        try:
+            # 订阅全局单例聚合器
+            await stream_aggregator.subscribe_market(symbol, onPrice, is_testnet=self._settings.useTestnet)
+            
+            # 挂起当前协程，直到 bot 任务被 Cancel
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            logger.info("🛑 [Aggregator-Client] 正在退订行情流: %s", symbol)
+            await stream_aggregator.unsubscribe_market(symbol, onPrice, is_testnet=self._settings.useTestnet)
+            raise
+        except Exception as e:
+            logger.error("❌ 行情流桥接异常: %s", e)
+            raise
 
     async def startUserDataStream(
         self,
         onOrderUpdate: Any,
     ) -> None:
         """
-        启动用户数据流 WebSocket（订单状态更新、余额变动）。
-        包含断线重连和心跳/超时检测机制。
-
-        @param onOrderUpdate 订单更新回调: async def callback(event: dict) -> None
+        启动用户数据流 WebSocket (接入 P4 聚合器模式)。
         """
-        logger.info("📡 启动用户数据 WebSocket ...")
+        # 我们假设这在 connect 之后调用，此时 api_key_id 等应该已经由 context 或 model 获取
+        # 注意：BinanceClient 并不总是有 api_key_id，但在 V3 中 bot_config 包含它。
+        # 我们可以通过 settings 获取
+        api_key_id = getattr(self._settings, "api_key_id", 0)
+        
+        logger.info("📡 [Aggregator-Client] 正在向聚合器订阅用户流: KeyID %s", api_key_id)
 
-        retry_count = 0
-        while True:
-            userSocket = None
-            try:
-                # 检查底层 Client 状态
-                if not await self._is_client_alive():
-                    await self.disconnect()
-                    await self.connect()
-
-                userSocket = self._socketManager.user_socket()
-                async with userSocket as stream:
-                    logger.info("🟢 用户数据流已挂载")
-                    retry_count = 0
-                    while True:
-                        try:
-                            # 用户流可能长达数小时没有余额变更，绝不能加 recv timeout。
-                            # 让底层的 websocket 依靠协议标准的 ping-pong 维持活性即可。
-                            msg = await stream.recv()
-                            if msg is None: continue
-
-                            eventType = msg.get("e", "")
-                            if eventType == "executionReport":
-                                # 同样异步处理，防止逻辑阻塞连接维护
-                                asyncio.create_task(onOrderUpdate(msg))
-                            elif eventType == "outboundAccountPosition":
-                                for b in msg.get("B", []):
-                                    asset = b["a"]
-                                    free = Decimal(b["f"])
-                                    self._balances[asset] = free
-                                self._lastBalanceUpdate = time.time()
-                                logger.info("💰 资产更新 (WS): %s", self._getBalancesSummary())
-
-                        except Exception as inner_e:
-                            logger.error("⚠️ 用户数据流接收阻塞报错: %s (静默连接被掐断)，强制跳出重连...", inner_e)
-                            break
-
-            except asyncio.CancelledError:
-                logger.info("🛑 用户数据流主动取消退出")
-                raise
-            except Exception as e:
-                retry_count += 1
-                wait_time = min(60, 5 + retry_count * 5)
-                logger.error("❌ 用户数据流异常退出: %s (%ds 后重试)", e, wait_time)
-                await asyncio.sleep(wait_time)
+        try:
+            await stream_aggregator.subscribe_user_data(
+                api_key_id=api_key_id,
+                api_key=self._settings.apiKey,
+                api_secret=self._settings.apiSecret,
+                is_testnet=self._settings.useTestnet,
+                callback=onOrderUpdate
+            )
+            
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            logger.info("🛑 [Aggregator-Client] 正在退订用户流: KeyID %s", api_key_id)
+            await stream_aggregator.unsubscribe_user_data(api_key_id, onOrderUpdate)
+            raise
+        except Exception as e:
+            logger.error("❌ 用户流桥接异常: %s", e)
+            raise

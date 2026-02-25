@@ -13,3 +13,5 @@ class User(Base):
     is_active = Column(Boolean, default=True, nullable=False)
 
     api_keys = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+    notification_settings = relationship("NotificationSetting", back_populates="user", uselist=False, cascade="all, delete-orphan")

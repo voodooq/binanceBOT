@@ -13,14 +13,21 @@ async def lifespan(app: FastAPI):
     from src.engine.redis_pubsub import redis_bus
     await redis_bus.start()
     
+    # [P4] 服务启动时持久化恢复所有 RUNNING 机器人
+    from src.db.session import SessionLocal
+    from src.engine.strategy_manager import strategy_manager
+    async with SessionLocal() as db:
+        await strategy_manager.init_and_resume_all(db)
+    
     yield
     
     # 退出应用时：自动中止所有机器人的交易并注销总线
-    try:
-        from src.engine.strategy_manager import strategy_manager
-        await strategy_manager.stop_all_bots()
-    except Exception as e:
-        logger.error(e)
+    from src.engine.strategy_manager import strategy_manager
+    await strategy_manager.stop_all_bots()
+    
+    # [P4] 停止流聚合中心
+    from src.engine.stream_aggregator import stream_aggregator
+    await stream_aggregator.stop()
         
     await redis_bus.stop()
 

@@ -30,4 +30,6 @@ cryptography>=42.0.0
 # === 单元测试设施 ===
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
-httpx>=0.26.0
+# === 科学计算与算法分析 ===
+numpy>=1.26.0
+pandas>=2.1.0 # (可选) 推荐用于大规模 K 线分析

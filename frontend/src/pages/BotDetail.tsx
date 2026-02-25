@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
     ChevronLeft,
@@ -9,16 +9,19 @@ import {
     LayoutGrid,
     Zap,
     Flame,
-    Loader2
+    Loader2,
+    ArrowRightLeft
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { LiveGridMonitor } from "@/components/LiveGridMonitor";
 import { cn } from "@/lib/utils";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 export default function BotDetail() {
     const { id } = useParams();
     const navigate = useNavigate();
     const [isPanicking, setIsPanicking] = useState(false);
+    const [deltaData, setDeltaData] = useState<any>(null);
 
     const { data: bot, isLoading, refetch } = useQuery({
         queryKey: ["bot", id],
@@ -36,6 +39,17 @@ export default function BotDetail() {
         },
         refetchInterval: 15000,
     });
+
+    // 处理实时推送数据 (P3 Delta 监控)
+    const handleMessage = useCallback((payload: any) => {
+        if (payload.bot_id.toString() !== id) return;
+
+        if (payload.type === "HEDGE_DELTA_UPDATE") {
+            setDeltaData(payload.data);
+        }
+    }, [id]);
+
+    useWebSocket(handleMessage);
 
     const handlePanicClose = async () => {
         const confirmed = window.confirm(`🔥 🚨 极高危操作警告 🚨 🔥\n\n确定要对 ${bot?.name} (${bot?.symbol}) 立即执行【一键平仓】吗？\n该操作会强制撤销所有网格挂单并市价抛售全部 Base Asset。此操作不可逆！`);
@@ -161,6 +175,31 @@ export default function BotDetail() {
                         </div>
                     </div>
                 )}
+
+                {/* P3: 对冲策略专属状态卡片 */}
+                {bot.strategy_type === "hedge" && (
+                    <div className="p-6 rounded-2xl bg-primary/5 border border-primary/20 flex flex-col justify-between h-32 md:col-span-3">
+                        <div className="flex justify-between items-start">
+                            <p className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
+                                <ArrowRightLeft className="w-3 h-3" />
+                                Delta 偏离度监控
+                            </p>
+                            <span className="px-2 py-0.5 rounded bg-green-500/20 text-green-500 text-[10px] font-black">中性平衡中</span>
+                        </div>
+                        <div className="flex items-end justify-between">
+                            <div className="flex items-baseline gap-2">
+                                <h2 className="text-3xl font-black text-primary">
+                                    {deltaData ? `${(deltaData.deviation_ratio * 100).toFixed(2)}%` : "0.00%"}
+                                </h2>
+                                <span className="text-xs font-medium text-muted-foreground">偏离</span>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-[10px] text-muted-foreground font-bold uppercase">重平衡阈值</p>
+                                <p className="text-sm font-mono font-bold">{(parseFloat(bot.parameters?.rebalance_threshold || "0.005") * 100).toFixed(1)}%</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
@@ -171,42 +210,65 @@ export default function BotDetail() {
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="font-bold flex items-center gap-2">
                                 <LayoutGrid className="w-4 h-4 text-primary" />
-                                策略参数概览
+                                {bot.strategy_type === 'hedge' ? '对冲对核心参数' : '网格参数概览'}
                             </h3>
                         </div>
 
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-2">
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">价格下限</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_lower_price || '--'}</span>
+                        {bot.strategy_type === 'hedge' ? (
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-2">
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-xs text-muted-foreground uppercase font-bold">目标价值</span>
+                                    <span className="text-sm font-mono font-bold">{bot.parameters?.target_notional || '--'} USDT</span>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-xs text-muted-foreground uppercase font-bold">平衡阈值</span>
+                                    <span className="text-sm font-mono font-bold">{(parseFloat(bot.parameters?.rebalance_threshold || "0") * 100).toFixed(2)}%</span>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-xs text-muted-foreground uppercase font-bold">风险保护</span>
+                                    <span className="text-sm font-mono font-bold">开启</span>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-xs text-muted-foreground uppercase font-bold">对冲乘数</span>
+                                    <span className="text-sm font-mono font-bold">1.0x (全对冲)</span>
+                                </div>
                             </div>
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">价格上限</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_upper_price || '--'}</span>
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">网格数量</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_count || '--'}</span>
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">单格投入</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.grid_investment_per_grid || '--'}</span>
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 py-2 border-t border-border/50">
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">止损比例</span>
-                                <span className="text-sm font-mono font-bold">{(parseFloat(bot.parameters?.stop_loss_percent || "0") * 100).toFixed(1)}%</span>
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">目标止盈</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.take_profit_amount || '--'} USDT</span>
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <span className="text-xs text-muted-foreground uppercase font-bold">自适应模式</span>
-                                <span className="text-sm font-mono font-bold">{bot.parameters?.adaptive_mode ? 'ON' : 'OFF'}</span>
-                            </div>
-                        </div>
+                        ) : (
+                            <>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-2">
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">价格下限</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.grid_lower_price || '--'}</span>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">价格上限</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.grid_upper_price || '--'}</span>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">网格数量</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.grid_count || '--'}</span>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">单格投入</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.grid_investment_per_grid || '--'}</span>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 py-2 border-t border-border/50">
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">止损比例</span>
+                                        <span className="text-sm font-mono font-bold">{(parseFloat(bot.parameters?.stop_loss_percent || "0") * 100).toFixed(1)}%</span>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">目标止盈</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.take_profit_amount || '--'} USDT</span>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-xs text-muted-foreground uppercase font-bold">自适应模式</span>
+                                        <span className="text-sm font-mono font-bold">{bot.parameters?.adaptive_mode ? 'ON' : 'OFF'}</span>
+                                    </div>
+                                </div>
+                            </>
+                        )}
                     </div>
 
                     {/* 成交历史 */}

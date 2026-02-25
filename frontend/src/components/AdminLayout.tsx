@@ -2,12 +2,15 @@ import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Bell, User, Wifi, WifiOff, Key } from "lucide-react";
 import { useState, useEffect } from "react";
+import { NotificationDrawer } from "./NotificationDrawer";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/store/useAppStore";
 
 export function AdminLayout() {
     const [isOnline, setIsOnline] = useState(true);
+    const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+    const [unreadCount, setUnreadCount] = useState(0);
     const { activeApiKeyId, setActiveApiKeyId } = useAppStore();
 
     // 加载用户所有 API Key
@@ -52,9 +55,15 @@ export function AdminLayout() {
                 {/* 顶部状态栏 */}
                 <header className="h-16 border-b border-border bg-card flex items-center justify-between px-8 text-card-foreground">
                     <div className="flex items-center gap-4">
-                        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-                            BINANCEBOT CORE V3.0
-                        </h2>
+                        <div className="flex flex-col gap-1">
+                            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                                BINANCEBOT CORE V3.0
+                            </h2>
+                            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                Backend: Persistent & Online
+                            </div>
+                        </div>
                     </div>
 
                     <div className="flex items-center gap-6">
@@ -94,9 +103,16 @@ export function AdminLayout() {
                         <div className="h-6 w-px bg-border" />
 
                         <div className="flex items-center gap-4">
-                            <button className="relative p-2 text-muted-foreground hover:text-foreground transition-colors">
+                            <button
+                                onClick={() => setIsNotificationOpen(true)}
+                                className="relative p-2 text-muted-foreground hover:text-foreground transition-colors"
+                            >
                                 <Bell className="w-5 h-5" />
-                                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-destructive rounded-full" />
+                                {unreadCount > 0 && (
+                                    <span className="absolute top-1.5 right-1.5 w-4 h-4 bg-destructive text-white text-[9px] font-black rounded-full flex items-center justify-center border-2 border-card">
+                                        {unreadCount > 9 ? "9+" : unreadCount}
+                                    </span>
+                                )}
                             </button>
                             <div className="flex items-center gap-3 pl-2 group cursor-pointer border-l border-transparent hover:border-border transition-all">
                                 <div className="flex flex-col items-end">
@@ -118,6 +134,13 @@ export function AdminLayout() {
                     </div>
                 </main>
             </div>
+
+            {/* 通知抽屉 */}
+            <NotificationDrawer
+                isOpen={isNotificationOpen}
+                onClose={() => setIsNotificationOpen(false)}
+                onUnreadChange={setUnreadCount}
+            />
         </div>
     );
 }

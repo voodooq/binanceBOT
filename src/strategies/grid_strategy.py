@@ -16,11 +16,12 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Any
 
 from src.exchanges.binance_client import BinanceClient
-from src.utils.notifier import Notifier
-from src.strategies.market_analyzer import MarketAnalyzer, MarketState, GridAdjustment
 from src.models.bot import BotConfig
+from src.services.notification_service import notification_service, NotificationLevel
+from src.strategies.market_analyzer import MarketAnalyzer, MarketState, GridAdjustment
 from src.db.session import AsyncSessionLocal
 from src.strategies.base_strategy import BaseStrategy
+from src.engine.redis_pubsub import redis_bus
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,9 @@ class GridStrategy(BaseStrategy):
         self._lastSpread: Decimal = Decimal("1")
         self._lastSpreadTime: float = 0
 
+        # 防并发锁 (元组: (gridIndex, GridSide))，防止异步 HTTP 延迟时重复进单
+        self._creation_locks: set[tuple[int, GridSide]] = set()
+
         # --- 自适应策略 ---
         self._analyzer = MarketAnalyzer(self._settings)
         self._currentAdjustment: GridAdjustment | None = None
@@ -218,8 +222,13 @@ class GridStrategy(BaseStrategy):
         """
         self.generateGrid()
 
-        # 尝试恢复之前的策略状态
+        # 2. 尝试恢复之前的策略状态
         restored = self._loadState()
+        
+        # 3. 获取当前市场价
+        currentPrice = await self._client.getCurrentPrice()
+        self._lastPrice = currentPrice
+
         if restored:
             logger.info("🔄 已恢复上次策略状态 (%d 个挂单)", len(self._orders))
         else:
@@ -230,28 +239,25 @@ class GridStrategy(BaseStrategy):
                 await self._client.nuke_all_orders()
             except Exception as e:
                 logger.error("❌ 战场清理失败: %s", e)
+            
+            # --- [P3] 自动底仓构建 (Bootstrapping) ---
+            await self._bootstrapPosition(currentPrice)
 
-        # 检查可用余额
+        # 4. 检查可用余额 (USDT)
         freeBalance = await self._client.getFreeBalance("USDT")
+        # ... 后续逻辑保持不变或稍作提示更新 ...
         totalRequired = self._settings.gridInvestmentPerGrid * self._settings.gridCount
         logger.info(
-            "💰 可用余额: %s USDT, 策略总需: %s USDT",
+            "💰 账户可用余额: %s USDT, 策略维持总需: %s USDT",
             freeBalance, totalRequired,
         )
 
-        if freeBalance < totalRequired * self._settings.reserveRatio:
-            logger.warning(
-                "⚠️ 可用余额 (%s) 低于最低要求 (%s)，策略可能无法完全执行",
-                freeBalance, totalRequired * self._settings.reserveRatio,
-            )
-
         self._notifier.notify(
-            f"🤖 网格策略已初始化\n"
+            f"🤖 网格策略初始化完成\n"
             f"交易对: {self._settings.tradingSymbol}\n"
-            f"网格范围: {self._settings.gridLowerPrice} ~ {self._settings.gridUpperPrice}\n"
-            f"网格数: {self._settings.gridCount}\n"
-            f"可用余额: {freeBalance} USDT\n"
-            f"自适应模式: {'✅ 已启用' if self._settings.adaptiveMode else '❌ 未启用'}"
+            f"当前价: {currentPrice}\n"
+            f"网格: {self._settings.gridLowerPrice} ~ {self._settings.gridUpperPrice}\n"
+            f"Bootstrapping: {'已执行/恢复' if not restored else '状态已恢复'}"
         )
         # 顺势拉起主循环
         await self.start()
@@ -273,6 +279,17 @@ class GridStrategy(BaseStrategy):
 
         self._lastPrice = price
 
+        # [P3] 实时价格广播：同步至前端监控水位线
+        asyncio.create_task(redis_bus.publish_trade_event(
+            user_id=self.bot_config.user_id,
+            bot_id=self.bot_config.id,
+            event_type="PRICE_UPDATE",
+            data={
+                "symbol": self._settings.tradingSymbol,
+                "price": float(price)
+            }
+        ))
+
         # --- 风控检查 ---
         if await self._checkStopLoss(price):
             return
@@ -293,6 +310,81 @@ class GridStrategy(BaseStrategy):
 
         # --- 网格交易逻辑 ---
         await self._evaluateGridOrders(price)
+
+    async def panic_close(self) -> dict[str, Any]:
+        """
+        [一键平仓]
+        强制清理战场：撤销由于此机器人发起的所有现货挂单，
+        并将本持仓周期内的 Base Asset 依照交易所精度 (Lot Size) 及最小金额限制 (Min Notional)
+        全部通过市价卖出回收为 USDT。
+        """
+        logger.warning("🚨 [一键平仓] 正在接收强平指令，启动强制撤单清算...")
+        
+        # 1. 撤销当前所有的 PENDING 网格单
+        try:
+            await self._client.cancelAllOrders()
+            # 标记本地状态位全部取消以防僵尸恢复
+            for order in self._orders.values():
+                order.status = OrderStatus.CANCELLED
+            self._orders.clear()
+            self._saveState() # 保存清空后的状态
+            logger.info("🗑️ [一键平仓] 网格挂单拦截并清理完毕")
+        except Exception as e:
+            logger.error("❌ [一键平仓] 撤单阶段发生异常: %s", e)
+            return {"status": "error", "message": f"撤单阶段失败: {e}"}
+
+        # 2. 查询该币种实际的可用余额
+        baseAsset = self._settings.tradingSymbol.replace("USDT", "")
+        freeBalance = await self._client.getFreeBalance(baseAsset)
+        
+        # 3. 截断小数位并进行 LOT_SIZE 对齐。借助 self._client.formatQuantity 可以直接获得截断后符合规则的字符串。
+        try:
+            sell_qty_str = self._client.formatQuantity(freeBalance)
+            sell_qty_dec = Decimal(sell_qty_str)
+        except Exception as e:
+            logger.warning("⚠️ [一键平仓] 格式化挂单数量失败: %s", e)
+            return {"status": "error", "message": "无法计算抛售精度"}
+
+        if sell_qty_dec <= 0:
+            msg = f"账户内 {baseAsset} 可用余额为 {freeBalance} (格式化后 0)，无可抛货物，清算直接结束"
+            logger.info("ℹ️ [一键平仓] %s", msg)
+            self._notifier.notify(f"ℹ️ **一键平仓**\n{msg}")
+            return {"status": "success", "message": msg}
+
+        # 4. 获取即时的最新买盘价格（或简单的最后交易价），以测算 MIN_NOTIONAL 强制防抛墙保护
+        try:
+            currentPrice = await self._client.getCurrentPrice()
+            estimated_value = sell_qty_dec * currentPrice
+            minNotional = self._client._minNotional
+            if estimated_value < minNotional:
+                error_msg = f"可抛资产 ({sell_qty_dec} @ {currentPrice}) 总价值约 {estimated_value:.2f} USDT，未能满足交易所要求的系统下限 ({minNotional} USDT)。强制抛售已中止，请人工接管。"
+                logger.error("🚫 [一键平仓] %s", error_msg)
+                self._notifier.notify(f"🚫 **一键平仓失败**\n{error_msg}")
+                return {"status": "error", "message": error_msg}
+        except Exception as e:
+            logger.warning("⚠️ 评估名义价值时报错 (尝试跳过强制): %s", e)
+
+        # 5. 放出真实市价单 (MARKET SELL) 强抛
+        try:
+            order = await self._client.createMarketOrder(
+                side="SELL",
+                quantity=sell_qty_dec
+            )
+            logger.warning("🔥 [一键平仓] 市价抛售完成! 卖出 %s %s", sell_qty_dec, baseAsset)
+            self._notifier.notify(
+                f"🔥 **一键平仓执行完毕**\n"
+                f"标的: {self._settings.tradingSymbol}\n"
+                f"状态: 所有网格单已撤销\n"
+                f"清算脱手: {sell_qty_dec} {baseAsset}"
+            )
+            # 重设自身标记：清理所有状态以便不再有遗留
+            self._running = False # 停止策略运行
+            self._saveState() # 保存清空后的状态
+            return {"status": "success", "data": order, "message": "所有挂单已撤销，资产池已通过市价折旧"}
+        except Exception as e:
+            logger.error("❌ [一键平仓] 市价卖出遇到核心异常: %s", e)
+            self._notifier.notify(f"❌ **一键平仓失败**\n市价卖出阶段失败: {e}")
+            return {"status": "error", "message": f"市价甩卖阶段失败: {e}"}
 
     async def _evaluateGridOrders(self, currentPrice: Decimal) -> None:
         """
@@ -322,10 +414,24 @@ class GridStrategy(BaseStrategy):
         # 从低到高扫描
         checkPrice = self._settings.gridLowerPrice
         while checkPrice <= self._settings.gridUpperPrice:
-            # 价格低于当前标价点
-            if currentPrice <= checkPrice:
-                # 检查该价位是否有挂单 (允许 10% step 的微小容差)
-                # v2.3 使用价格作为 key，但为了更稳健，我们扫描所有 PENDING 单
+            # --- 卖出盘区 (当前价格以上) ---
+            if checkPrice > currentPrice:
+                isPriceOccupied = False
+                for o in self._orders.values():
+                    if o.side == GridSide.SELL and o.status in (OrderStatus.PENDING,):
+                        if abs(o.price - checkPrice) < (dynamicStep * Decimal("0.1")):
+                            isPriceOccupied = True
+                            break
+                
+                if not isPriceOccupied:
+                    # 简单估算索引
+                    virtualIdx = int((checkPrice - self._settings.gridLowerPrice) / dynamicStep) if dynamicStep > 0 else 0
+                    # 对于初始化卖单区，相当于假装以 checkPrice - step 买入，这里将调用一个独立的逻辑来进行现货高频核算卖单
+                    await self._placeInitialSellOrder(virtualIdx, checkPrice, dynamicStep)
+                    await asyncio.sleep(0.15)
+                    
+            # --- 买入盘区 (当前价格以下) ---
+            elif checkPrice < currentPrice:
                 isPriceOccupied = False
                 for o in self._orders.values():
                     # 判断如果该价格附近存在 PENDING 或者 已经买入了但还没完成套利清仓的买单(FILLED)，则视为此网格已被占用
@@ -350,96 +456,101 @@ class GridStrategy(BaseStrategy):
         @param gridIndex 网格索引
         @param price 买入价格
         """
-        # --- 价差检查 (V3.0 缓存优化) ---
-        now = time.time()
-        if now - self._lastSpreadTime > 5:
-            # 仅在缓存失效时请求盘口，消耗 5 权重
-            self._lastSpread = await self._client.getBidAskSpread()
-            self._lastSpreadTime = now
-            
-        if self._lastSpread > self._settings.maxSpreadPercent:
-            logger.info(
-                "🛡️ [诊断-拦截] 价差过大 (%s%% > %s%%)，暂停在网格 %d 挂单",
-                self._lastSpread * 100, self._settings.maxSpreadPercent * 100, gridIndex,
-            )
-            return
-
-        # --- 资金预留检查 (V3.0 使用缓存镜像) ---
-        # getFreeBalance 现在从本地快照读取，0 权重
-        freeBalance = await self._client.getFreeBalance("USDT")
-        
-        # 使用本地挂买单列表计算已占用资金
-        pendingBuyOrders = [o for o in self._orders.values() if o.status == OrderStatus.PENDING and o.side == GridSide.BUY]
-        totalInvested = sum(o.quantity * o.price for o in pendingBuyOrders) # 近似值
-        
-        totalFunds = freeBalance + totalInvested
-        if freeBalance < totalFunds * self._settings.reserveRatio:
-            logger.info(
-                "🛡️ [诊断-拦截] 可用余额 (%s) 低于预留要求 (%s%%)，暂停新建仓位",
-                freeBalance, self._settings.reserveRatio * 100,
-            )
-            return
-
-        # --- 仓位占比检查 (V3.0 零权重计算) ---
-        # 传入当前价格计算实时持仓价值
-        positionOverLimit = await self._checkPositionRatio(price)
-        if positionOverLimit:
-            logger.info("🛡️ [诊断-拦截] 持仓占比超限，暂停买入")
-            return
-
-        # --- 挂单数上限检查 (V3.0: 本地计数, 0 权重) ---
-        pendingCount = sum(
-            1 for o in self._orders.values()
-            if o.status == OrderStatus.PENDING
-        )
-        if pendingCount >= self._settings.maxOrderCount:
-            logger.info(
-                "🛡️ [诊断-拦截] 挂单数已达上限 (%d/%d)，暂停新挂单",
-                pendingCount, self._settings.maxOrderCount,
-            )
-            return
-
-        # --- RateLimiter 熔断检查 ---
-        if self._rateLimiter.isInCircuitBreaker:
-            logger.info("🛡️ [诊断-拦截] 权重熔断中，跳过新买单")
-            return
-
-        # 计算买入数量（自适应模式下动态调整投入量）
-        baseInvestment = self._settings.gridInvestmentPerGrid
-        if self._currentAdjustment:
-            baseInvestment = baseInvestment * self._currentAdjustment.investmentMultiplier
-            # NOTE: 限制马丁格尔加仓不超过配置的上限
-            maxInvestment = self._settings.gridInvestmentPerGrid * self._settings.martinMultiplier
-            baseInvestment = min(baseInvestment, maxInvestment)
-
-        # --- 马丁安全层：连续加仓层数超限时回退到标准投入 ---
-        if self._martinLevel >= self._settings.maxMartinLevels:
-            logger.warning("⚠️ 马丁加仓已达上限 (%d层)，回退标准投入", self._martinLevel)
-            baseInvestment = self._settings.gridInvestmentPerGrid
-
-        quantity = baseInvestment / price
-
-        # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
-        # 币安要求单笔订单金额必须大于 minNotional (通常测试网是 5或10，主网是 10或5)
-        # 如果计算出的投资额不够，强制上调 quantity 凑够最低消费限制，防止 -1013 错误
-        minNotional = self._client._minNotional
-        if (quantity * price) < minNotional:
-            logger.debug("⚠️ 买单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * price), float(minNotional))
-            # 补足最低金额，并额外加上 1% 缓冲防止因为价格在挂单瞬间微跌导致四舍五入后又不够了
-            safeNotional = minNotional * Decimal("1.01")
-            quantity = safeNotional / price
-            
-        # 截断到交易所允许的精度
-        quantity = Decimal(self._client.formatQuantity(quantity))
-
-        # --- ⏳ 交易冷却拦截器 ---
-        currentTime = time.time()
-        if currentTime - self._lastTradeTime < self._cooldownSeconds:
-            # 冷却期内直接跳过，保障狙击节奏
-            # NOTE 关闭高频打印： logger.info("🛡️ [诊断-拦截] 处于交易冷却期中 (%s 秒前)", currentTime - self._lastTradeTime)
-            return
+        lock_key = (gridIndex, GridSide.BUY)
+        if lock_key in self._creation_locks:
+            return  # 正在挂单中，跳过本次触发
+        self._creation_locks.add(lock_key)
 
         try:
+            # --- 价差检查 (V3.0 缓存优化) ---
+            now = time.time()
+            if now - self._lastSpreadTime > 5:
+                # 仅在缓存失效时请求盘口，消耗 5 权重
+                self._lastSpread = await self._client.getBidAskSpread()
+                self._lastSpreadTime = now
+                
+            if self._lastSpread > self._settings.maxSpreadPercent:
+                logger.info(
+                    "🛡️ [诊断-拦截] 价差过大 (%s%% > %s%%)，暂停在网格 %d 挂单",
+                    self._lastSpread * 100, self._settings.maxSpreadPercent * 100, gridIndex,
+                )
+                return
+
+            # --- 资金预留检查 (V3.0 使用缓存镜像) ---
+            # getFreeBalance 现在从本地快照读取，0 权重
+            freeBalance = await self._client.getFreeBalance("USDT")
+            
+            # 使用本地挂买单列表计算已占用资金
+            pendingBuyOrders = [o for o in self._orders.values() if o.status == OrderStatus.PENDING and o.side == GridSide.BUY]
+            totalInvested = sum(o.quantity * o.price for o in pendingBuyOrders) # 近似值
+            
+            totalFunds = freeBalance + totalInvested
+            if freeBalance < totalFunds * self._settings.reserveRatio:
+                logger.info(
+                    "🛡️ [诊断-拦截] 可用余额 (%s) 低于预留要求 (%s%%)，暂停新建仓位",
+                    freeBalance, self._settings.reserveRatio * 100,
+                )
+                return
+
+            # --- 仓位占比检查 (V3.0 零权重计算) ---
+            # 传入当前价格计算实时持仓价值
+            positionOverLimit = await self._checkPositionRatio(price)
+            if positionOverLimit:
+                logger.info("🛡️ [诊断-拦截] 持仓占比超限，暂停买入")
+                return
+
+            # --- 挂单数上限检查 (V3.0: 本地计数, 0 权重) ---
+            pendingCount = sum(
+                1 for o in self._orders.values()
+                if o.status == OrderStatus.PENDING
+            )
+            if pendingCount >= self._settings.maxOrderCount:
+                logger.info(
+                    "🛡️ [诊断-拦截] 挂单数已达上限 (%d/%d)，暂停新挂单",
+                    pendingCount, self._settings.maxOrderCount,
+                )
+                return
+
+            # --- RateLimiter 熔断检查 ---
+            if self._rateLimiter.isInCircuitBreaker:
+                logger.info("🛡️ [诊断-拦截] 权重熔断中，跳过新买单")
+                return
+
+            # 计算买入数量（自适应模式下动态调整投入量）
+            baseInvestment = self._settings.gridInvestmentPerGrid
+            if self._currentAdjustment:
+                baseInvestment = baseInvestment * self._currentAdjustment.investmentMultiplier
+                # NOTE: 限制马丁格尔加仓不超过配置的上限
+                maxInvestment = self._settings.gridInvestmentPerGrid * self._settings.martinMultiplier
+                baseInvestment = min(baseInvestment, maxInvestment)
+
+            # --- 马丁安全层：连续加仓层数超限时回退到标准投入 ---
+            if self._martinLevel >= self._settings.maxMartinLevels:
+                logger.warning("⚠️ 马丁加仓已达上限 (%d层)，回退标准投入", self._martinLevel)
+                baseInvestment = self._settings.gridInvestmentPerGrid
+
+            quantity = baseInvestment / price
+
+            # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
+            # 币安要求单笔订单金额必须大于 minNotional (通常测试网是 5或10，主网是 10或5)
+            # 如果计算出的投资额不够，强制上调 quantity 凑够最低消费限制，防止 -1013 错误
+            minNotional = self._client._minNotional
+            if (quantity * price) < minNotional:
+                logger.debug("⚠️ 买单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * price), float(minNotional))
+                # 补足最低金额，并额外加上 1% 缓冲防止因为价格在挂单瞬间微跌导致四舍五入后又不够了
+                safeNotional = minNotional * Decimal("1.01")
+                quantity = safeNotional / price
+                
+            # 截断到交易所允许的精度
+            quantity = Decimal(self._client.formatQuantity(quantity))
+
+            # --- ⏳ 交易冷却拦截器 ---
+            currentTime = time.time()
+            if currentTime - self._lastTradeTime < self._cooldownSeconds:
+                # 冷却期内直接跳过，保障狙击节奏
+                # NOTE 关闭高频打印： logger.info("🛡️ [诊断-拦截] 处于交易冷却期中 (%s 秒前)", currentTime - self._lastTradeTime)
+                return
+
             order = await self._client.createLimitOrder(
                 side="BUY",
                 price=price,
@@ -474,6 +585,160 @@ class GridStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error("❌ 网格 %d 买单失败: %s", gridIndex, e)
+        finally:
+            self._creation_locks.discard(lock_key)
+
+    async def _placeInitialSellOrder(self, gridIndex: int, sellPrice: Decimal, step: Decimal) -> None:
+        """
+        在高于现价的网格初始化挂卖单（卖盘区构建）。
+        需核对基础资产余额，只有在此前建有底仓（或本身持有代币）时才能挂出。
+        """
+        lock_key = (gridIndex, GridSide.SELL)
+        if lock_key in self._creation_locks:
+            return
+        self._creation_locks.add(lock_key)
+
+        try:
+            assumedBuyPrice = sellPrice - step
+            if assumedBuyPrice <= 0: return
+
+            # 计算理论投入和购买量（自适应模式下动态调整投入量）
+            baseInvestment = self._settings.gridInvestmentPerGrid
+            if self._currentAdjustment:
+                baseInvestment = baseInvestment * self._currentAdjustment.investmentMultiplier
+                maxInvestment = self._settings.gridInvestmentPerGrid * self._settings.martinMultiplier
+                baseInvestment = min(baseInvestment, maxInvestment)
+
+            quantity = baseInvestment / assumedBuyPrice
+
+            # --- 🛡️ 仓位预检查 (无币不可挂卖单) ---
+            baseAsset = self._settings.tradingSymbol.replace("USDT", "")
+            freeBase = await self._client.getFreeBalance(baseAsset)
+            
+            if freeBase < quantity:
+                # 剩余可用代币已经不足满铺当前这层高位网格，安静撤退不抱错
+                return
+                
+            # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
+            minNotional = self._client._minNotional
+            if (quantity * sellPrice) < minNotional:
+                if freeBase >= (minNotional * Decimal("1.01") / sellPrice):
+                    quantity = (minNotional * Decimal("1.01")) / sellPrice
+                else:
+                    return
+                    
+            # 截断到交易所允许的精度
+            quantity = Decimal(self._client.formatQuantity(quantity))
+
+            # --- ⏳ 交易冷却拦截器 ---
+            currentTime = time.time()
+            if currentTime - self._lastTradeTime < self._cooldownSeconds:
+                return
+
+            order = await self._client.createLimitOrder(
+                side="SELL",
+                price=sellPrice,
+                quantity=quantity,
+            )
+            self._lastTradeTime = time.time()
+
+            sellOrder = GridOrder(
+                gridIndex=gridIndex,
+                price=sellPrice,
+                side=GridSide.SELL,
+                quantity=quantity,
+                orderId=order.get("orderId"),
+                status=OrderStatus.PENDING,
+                entryPrice=assumedBuyPrice,
+            )
+            self._orders[sellPrice] = sellOrder
+            logger.info("🟡 初始卖盘区建仓: 网格 %d @ %s, 数量 %s", gridIndex, sellPrice, quantity)
+            self._notifier.notify(
+                f"🟡 卖盘区底仓部署完成\n"
+                f"网格 {gridIndex} → 挂卖 @ {sellPrice}\n"
+                f"数量: {quantity}"
+            )
+            self._saveState()
+
+        except Exception as e:
+            logger.error("❌ 初始卖单布阵失败 (网格 %d): %s", gridIndex, e)
+        finally:
+            self._creation_locks.discard(lock_key)
+
+    async def _bootstrapPosition(self, currentPrice: Decimal) -> None:
+        """
+        [P3] 自动底仓构建逻辑。
+        针对当前价格以上的卖盘区网格，预先通过市价单买入所需的 Base Asset，
+        确保系统启动后可以直接挂出完整的卖单墙。
+        """
+        logger.info("🚀 [Bootstrapping] 启动底仓自动构建程序...")
+        
+        baseAsset = self._settings.tradingSymbol.replace("USDT", "")
+        # 计算理论步长
+        baseStep = (self._settings.gridUpperPrice - self._settings.gridLowerPrice) / Decimal(str(self._settings.gridCount))
+        
+        # 1. 计算所有在当前价格之上的网格需要的 Base Asset 总量
+        totalBaseNeeded = Decimal("0")
+        checkPrice = self._settings.gridLowerPrice
+        while checkPrice <= self._settings.gridUpperPrice:
+            if checkPrice > currentPrice:
+                # 假设买入价为该卖单价减去一个步长
+                assumedBuyPrice = checkPrice - baseStep
+                if assumedBuyPrice > 0:
+                    qty = self._settings.gridInvestmentPerGrid / assumedBuyPrice
+                    totalBaseNeeded += qty
+            checkPrice += baseStep
+            if baseStep <= 0: break
+            
+        if totalBaseNeeded <= 0:
+            logger.info("ℹ️ [Bootstrapping] 当前处于高位，无需额外买入底仓")
+            return
+
+        # 2. 检查现有持仓情况
+        try:
+            freeBase = await self._client.getFreeBalance(baseAsset)
+            neededToBuy = totalBaseNeeded - freeBase
+        except Exception as e:
+            logger.error("❌ [Bootstrapping] 无法获取账户余额: %s", e)
+            return
+
+        if neededToBuy <= 0:
+            logger.info("✅ [Bootstrapping] 现有底仓 (%s %s) 已满足要求 (需 %s)", freeBase, baseAsset, totalBaseNeeded)
+            return
+
+        # 3. 执行市价买入补齐底仓
+        logger.warning("🧱 [Bootstrapping] 发现底仓缺口: 需买入 %s %s 以填补高位卖单", neededToBuy, baseAsset)
+        
+        # 检查 USDT 是否足够执行此次强买
+        try:
+            freeUSDT = await self._client.getFreeBalance("USDT")
+            estimatedCost = neededToBuy * currentPrice * Decimal("1.02") # 加 2% 价格波动缓冲
+            if freeUSDT < estimatedCost:
+                logger.warning("⚠️ [Bootstrapping] USDT 余额 (%s) 不足以购买所需底仓 (预估需 %s)", freeUSDT, estimatedCost)
+                # 如果不够，则有多少买多少，或者直接抛出由于资金不足无法完全挂单的警告
+                neededToBuy = freeUSDT / (currentPrice * Decimal("1.02"))
+                if neededToBuy <= 0: return
+
+            # 格式化数量
+            buyQty = Decimal(self._client.formatQuantity(neededToBuy))
+            if buyQty <= 0: return
+
+            logger.info("🛒 [Bootstrapping] 正在通过市价单买入底仓: %s %s ...", buyQty, baseAsset)
+            order = await self._client.createMarketOrder(
+                side="BUY",
+                quantity=buyQty
+            )
+            logger.info("🔥 [Bootstrapping] 底仓补齐完成! 成交详情: %s", order.get("orderId"))
+            self._notifier.notify(
+                f"🧱 **底仓自动构建完成**\n"
+                f"市价买入: {buyQty} {baseAsset}\n"
+                f"用途: 支撑后续高位网格卖单挂出"
+            )
+        except Exception as e:
+            logger.error("❌ [Bootstrapping] 市价买入补仓失败: %s", e)
+            self._notifier.notify(f"⚠️ **底仓构建失败**\n原因: {e}")
+        finally:
+            self._creation_locks.discard(lock_key)
 
     async def on_order_update(self, event: dict[str, Any]) -> None:
         """
@@ -529,6 +794,15 @@ class GridStrategy(BaseStrategy):
         feeAmt = Decimal(event.get("n", "0"))        # 手续费
         feeAsset = event.get("N", "")               # 手续费币种
 
+        # [P3] 实时通知推送：成交通知
+        notification_service.send_notification(
+            user_id=self.bot_config.user_id,
+            title=f"✅ 网格单成交: {self.bot_config.symbol}",
+            message=f"策略 [{self.bot_config.name}] 的一笔 {side} 单已成交。\n价格: {filledPrice} | 数量: {filledQty}",
+            level=NotificationLevel.SUCCESS,
+            data={"bot_id": self.bot_config.id, "order_id": orderId}
+        )
+
         if side == "BUY":
             logger.info(
                 "\u2705 \u4e70\u5355\u6210\u4ea4: \u7f51\u683c %d @ %s, \u6570\u91cf %s",
@@ -565,6 +839,24 @@ class GridStrategy(BaseStrategy):
                     f"\u7d2f\u8ba1: {self._realizedProfit} USDT"
                 )
 
+                # [P3] Redis 广播利润事件，驱动前端金光动画
+                try:
+                    await redis_bus.publish_trade_event(
+                        user_id=self.bot_config.user_id,
+                        bot_id=self.bot_config.id,
+                        event_type="PROFIT_MATCHED",
+                        data={
+                            "grid_index": matchedGrid.gridIndex,
+                            "sell_price": float(filledPrice),
+                            "buy_price": float(matchedGrid.entryPrice),
+                            "profit": float(profit),
+                            "total_pnl": float(self._realizedProfit),
+                            "symbol": self._settings.tradingSymbol
+                        }
+                    )
+                except Exception as e:
+                    logger.warning("推送 Redis 利润事件失败: %s", e)
+
                 # 清除已完成的网格订单，允许重新挂单
                 del self._orders[matchedGrid.price]
                 
@@ -575,7 +867,9 @@ class GridStrategy(BaseStrategy):
         # V3 新增: 原子的短生命周期 DB 事务以落库记录此笔完整成交
         try:
             from src.models.trade import Trade, OrderSide as DBOrderSide, OrderStatus as DBOrderStatus
+            from sqlalchemy import update
             async with AsyncSessionLocal() as session:
+                # 1. 记录成交明细
                 new_trade = Trade(
                     bot_config_id=self.bot_config.id,
                     exchange_order_id=str(orderId) if orderId is not None else "local",
@@ -589,9 +883,18 @@ class GridStrategy(BaseStrategy):
                     fee_asset=feeAsset
                 )
                 session.add(new_trade)
+                
+                # 2. 如果是卖单成交，同步更新 BotConfig 的 cumulative PnL
+                if side == "SELL":
+                    await session.execute(
+                        update(BotConfig)
+                        .where(BotConfig.id == self.bot_config.id)
+                        .values(total_pnl=self._realizedProfit)
+                    )
+                
                 await session.commit()
         except Exception as e:
-            logger.error("记录 Trade 订单 [bot=%d, orderId=%s] 入库失败: %s", self.bot_config.id, orderId, e)
+            logger.error("记录 Trade 订单 [bot=%d, orderId=%s] 及 PnL 同步失败: %s", self.bot_config.id, orderId, e)
 
         self._saveState()
 
@@ -608,16 +911,21 @@ class GridStrategy(BaseStrategy):
         @param buyPrice 实际买入价格
         @param quantity 买入数量
         """
-        # 上一级网格价位
-        sellGridIndex = gridIndex + 1
-        if sellGridIndex >= len(self._gridPrices):
-            # 已在最高网格，直接用买入价 + 步长
-            step = (self._settings.gridUpperPrice - self._settings.gridLowerPrice) / self._settings.gridCount
-            sellPrice = buyPrice + step
-        else:
-            sellPrice = self._gridPrices[sellGridIndex]
+        lock_key = (gridIndex, GridSide.SELL)
+        if lock_key in self._creation_locks:
+            return
+        self._creation_locks.add(lock_key)
 
         try:
+            # 上一级网格价位
+            sellGridIndex = gridIndex + 1
+            if sellGridIndex >= len(self._gridPrices):
+                # 已在最高网格，直接用买入价 + 步长
+                step = (self._settings.gridUpperPrice - self._settings.gridLowerPrice) / self._settings.gridCount
+                sellPrice = buyPrice + step
+            else:
+                sellPrice = self._gridPrices[sellGridIndex]
+
             await asyncio.sleep(0.2)
 
             # --- ⏳ 交易冷却拦截器 (卖单使用排队等待) ---
@@ -681,6 +989,8 @@ class GridStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error("❌ 配对卖单失败 (网格 %d): %s", gridIndex, e)
+        finally:
+            self._creation_locks.discard(lock_key)
 
     # ==================================================
     # 风控系统
