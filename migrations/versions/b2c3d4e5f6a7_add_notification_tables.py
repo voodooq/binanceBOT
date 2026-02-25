@@ -17,16 +17,18 @@ down_revision: Union[str, Sequence[str], None] = 'a1b2c3d4e5f6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# NOTE: 与 Notification 模型使用同一个枚举名称，避免重复创建
+# NOTE: create_type=False 防止 SQLAlchemy 在 create_table 时自动隐式创建枚举
+# 枚举的创建由下方的显式 .create() 调用统一管理
 notification_level_enum = sa.Enum(
     'info', 'success', 'warning', 'error', 'critical',
-    name='notification_level_enum'
+    name='notification_level_enum',
+    create_type=False
 )
 
 
 def upgrade() -> None:
     """创建通知流水表和用户通知偏好设置表。"""
-    # 先创建枚举类型（PostgreSQL 需要显式创建）
+    # 显式创建枚举类型，checkfirst=True 保证幂等
     notification_level_enum.create(op.get_bind(), checkfirst=True)
 
     op.create_table('notifications',
