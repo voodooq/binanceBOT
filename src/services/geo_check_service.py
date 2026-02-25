@@ -13,7 +13,7 @@ class GeoCheckService:
     # 币安主要限制的区域列表 (ISO 国家代码)
     # 常规限制包括：美国(US)、加拿大(CA)、中国(CN)、新加坡(SG)、马来西亚(MY)、日本(JP)、英国(GB)等
     PROHIBITED_COUNTRIES = {
-        "US", "CA", "CN", "SG", "MY", "JP", "GB", "NL", "DE", "IT"
+        "US", "CN", "NL"
     }
     
     async def get_ip_info(self, proxy: Optional[str] = None) -> Optional[dict]:
