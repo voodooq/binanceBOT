@@ -6,7 +6,7 @@ from typing import Callable, Coroutine
 from redis.asyncio.client import PubSub
 
 from src.db.session import redis_client
-from src.engine.strategy_manager import strategy_manager
+# from src.engine.strategy_manager import strategy_manager # Moved to lazy import in handle method
 from src.engine.ws_hub import ws_hub
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,7 @@ class RedisEventBus:
                 logger.critical("🛑 [Kill Switch] 收到全服挂起指令，立即斩断交易并推送给所有的前端!")
                 
                 # 1. 中断管理器内所有的机器人运行
+                from src.engine.strategy_manager import strategy_manager
                 await strategy_manager.stop_all_bots()
                 
                 # 2. 推送系统公告级提醒给所有 Web 端访客
