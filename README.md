@@ -4,8 +4,8 @@
 
 ## 🚀 核心特性 (V3.0 新增)
 - **多账户管理**: 支持同时挂载多个 Binance 账户（实盘或 Testnet），且支持每个账户绑定独立的代理服务器。
-- **资管级安全**: API Secret 采用信封加密 (Envelope Encryption)，私钥仅在内存中临时还原，禁止明文落地。
-- **现代化 UI**: 基于 React + Tailwind CSS 的深色模式管理后台，实时观测挂单分布与收益曲线。
+- **信封加密安全**: API Secret 采用 Envelope Encryption，私钥仅在内存中临时还原，禁止明文落地。
+- **高可用审计认证**: 通过 P0-P4 全量代码审计，内置 Listen Key 自动保活、断电恢复 Gap Check 及手续费自动缓冲机制。
 - **高性能引擎**: 采用 `uvloop` (Linux) 与 `orjson` 优化，支持高并发挂单与毫秒级事件响应。
 - **生产就绪**: 内置 Nginx 反向代理、自动化 Docker 编排以及跨进程熔断开关 (Kill Switch)。
 

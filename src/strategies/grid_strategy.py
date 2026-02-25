@@ -240,15 +240,23 @@ class GridStrategy(BaseStrategy):
             except Exception as e:
                 logger.error("❌ 战场清理失败: %s", e)
             
+            # --- [P4] Gap Check: 检查价格是否击穿边界 ---
+            if currentPrice > self._settings.gridUpperPrice or currentPrice < self._settings.gridLowerPrice:
+                logger.warning("🚨 [Gap Check] 价格已击穿网格边界 (%s), 启动失败，请调整区间。", currentPrice)
+                self._notifier.notify(f"🚨 **Gap Check 拦截**\n价格 {currentPrice} 已超出网格区间 {self._settings.gridLowerPrice}~{self._settings.gridUpperPrice}。机器人将处于 PAUSED 状态。")
+                self._running = False
+                return
+
             # --- [P3] 自动底仓构建 (Bootstrapping) ---
             await self._bootstrapPosition(currentPrice)
 
         # 4. 检查可用余额 (USDT)
         freeBalance = await self._client.getFreeBalance("USDT")
-        # ... 后续逻辑保持不变或稍作提示更新 ...
-        totalRequired = self._settings.gridInvestmentPerGrid * self._settings.gridCount
+        
+        # [P2] 手续费缓冲验证：总投资额 = (网格数 * 单格投入) × 1.002
+        totalRequired = (self._settings.gridInvestmentPerGrid * self._settings.gridCount) * Decimal("1.002")
         logger.info(
-            "💰 账户可用余额: %s USDT, 策略维持总需: %s USDT",
+            "💰 账户可用余额: %s USDT, 策略维持总需 (含0.2%%手续费): %s USDT",
             freeBalance, totalRequired,
         )
 

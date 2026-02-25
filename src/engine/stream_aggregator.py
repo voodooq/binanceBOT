@@ -133,6 +133,24 @@ class StreamAggregator:
 
     async def _user_loop(self, api_key_id: int, bm: BinanceSocketManager, client: AsyncClient):
         """用户数据推送主循环"""
+        # [P4] Listen Key 自动保活任务
+        async def _keepalive_task():
+            try:
+                while True:
+                    await asyncio.sleep(1800) # 每 30 分钟续期一次
+                    try:
+                        logger.debug(f"🔄 [Aggregator] 正在续期 Listen Key: KeyID {api_key_id}")
+                        await client.start_user_data_stream() # 在 python-binance 中，再次调用此方法若存续则会执行 PUT 续期
+                        logger.debug(f"✅ [Aggregator] Listen Key 续期成功: KeyID {api_key_id}")
+                    except Exception as e:
+                        logger.error(f"⚠️ [Aggregator] Listen Key 单次续期异常，将在下个周期重试: {e}")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"❌ [Aggregator] Listen Key 核心保活协程奔溃 [KeyID: {api_key_id}]: {e}")
+
+        keepalive = asyncio.create_task(_keepalive_task())
+        
         try:
             user_socket = bm.user_socket()
             async with user_socket as stream:
@@ -156,6 +174,8 @@ class StreamAggregator:
             pass
         except Exception as e:
             logger.error(f"User Stream Loop Crash [{api_key_id}]: {e}")
+        finally:
+            keepalive.cancel()
 
     async def stop(self):
         """停机清理"""

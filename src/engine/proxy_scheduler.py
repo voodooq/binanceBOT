@@ -60,6 +60,34 @@ class ProxyScheduler:
             self._pool[proxy_url] = max(0, self._pool[proxy_url] - 1)
             logger.info(f"♻️ [ProxyScheduler] 代理已回收: {proxy_url} (剩余载荷: {self._pool[proxy_url]})")
 
+    async def start_health_check(self):
+        """[P3] 启动代理周期性探活任务"""
+        while True:
+            if self._pool:
+                tasks = [self._check_node(p) for p in self._pool.keys()]
+                await asyncio.gather(*tasks)
+            await asyncio.sleep(60) # 每分钟探活一次
+
+    async def _check_node(self, proxy_url: str):
+        """测试单个节点可用性，若失效则暂时剔除或标记"""
+        import aiohttp
+        try:
+            connector = None
+            if proxy_url.startswith("socks5"):
+                from aiohttp_socks import ProxyConnector
+                connector = ProxyConnector.from_url(proxy_url)
+            
+            async with aiohttp.ClientSession(connector=connector) as session:
+                # 访问币安 API 测试连通性
+                async with session.get("https://api.binance.com/api/v3/ping", timeout=5) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Status {resp.status}")
+        except Exception as e:
+            logger.warning(f"⚠️ [ProxyScheduler] 节点故障: {proxy_url} | 原因: {e}")
+            # 这里可以根据需要将节点从 pool 中暂时移除或标记
+            # 简单起见，如果连续失败多次，可以 pop 掉
+            pass
+
     @property
     def total_capacity(self) -> int:
         return len(self._pool)
