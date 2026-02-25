@@ -59,6 +59,8 @@ class MockBinanceClient:
     async def futuresCreateOrder(self, **kwargs):
         """模拟合约下单"""
         return await self.createOrder(**kwargs)
+    
+    futures_create_order = futuresCreateOrder
 
     async def cancelOrder(self, **kwargs):
         return {"status": "CANCELED"}
@@ -81,6 +83,10 @@ class MockBinanceClient:
     
     # 别名兼容
     get_klines = getKlines
+    get_current_price = getCurrentPrice
+    create_market_order = createOrder
+    createOrder = createOrder
+    create_order = createOrder
 
 class BacktestEngine:
     """

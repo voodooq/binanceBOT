@@ -132,25 +132,33 @@ class GridStrategy(BaseStrategy):
         
         # NOTE: 实例化 V3 V2 的兼容配置代理
         p = bot_config.parameters
+        def to_decimal(val, default="0"):
+            if val is None or str(val).strip() == "":
+                return Decimal(default)
+            try:
+                return Decimal(str(val))
+            except Exception:
+                return Decimal(default)
+
         self._settings = GridSettingsProxy(
-            gridLowerPrice=Decimal(str(p.get("grid_lower_price", 0))),
-            gridUpperPrice=Decimal(str(p.get("grid_upper_price", 0))),
+            gridLowerPrice=to_decimal(p.get("grid_lower_price")),
+            gridUpperPrice=to_decimal(p.get("grid_upper_price")),
             gridCount=int(p.get("grid_count", 0)),
-            gridInvestmentPerGrid=Decimal(str(p.get("grid_investment_per_grid", 0))),
-            reserveRatio=Decimal(str(p.get("reserve_ratio", "0.05"))),
+            gridInvestmentPerGrid=to_decimal(p.get("grid_investment_per_grid")),
+            reserveRatio=to_decimal(p.get("reserve_ratio", "0.05")),
             adaptiveMode=bool(p.get("adaptive_mode", False)),
             analysisInterval=int(p.get("analysis_interval", 15)),
-            maxSpreadPercent=Decimal(str(p.get("max_spread_percent", "0.005"))),
+            maxSpreadPercent=to_decimal(p.get("max_spread_percent", "0.005")),
             maxOrderCount=int(p.get("max_order_count", 50)),
-            maxPositionRatio=Decimal(str(p.get("max_position_ratio", "0.95"))),
-            stopLossPercent=Decimal(str(p.get("stop_loss_percent", "0.2"))),
-            takeProfitAmount=Decimal(str(p.get("take_profit_amount", "1000"))),
-            martinMultiplier=Decimal(str(p.get("martin_multiplier", "1.5"))),
+            maxPositionRatio=to_decimal(p.get("max_position_ratio", "0.95")),
+            stopLossPercent=to_decimal(p.get("stop_loss_percent", "0.2")),
+            takeProfitAmount=to_decimal(p.get("take_profit_amount", "1000")),
+            martinMultiplier=to_decimal(p.get("martin_multiplier", "1.5")),
             maxMartinLevels=int(p.get("max_martin_levels", 3)),
             tradingSymbol=bot_config.symbol,
             tradeCooldown=float(p.get("trade_cooldown", 5.0)),
             staleDataTimeout=float(p.get("stale_data_timeout", 300.0)),
-            maxDrawdown=Decimal(str(p.get("max_drawdown", "0.2"))),
+            maxDrawdown=to_decimal(p.get("max_drawdown", "0.2")),
         )
 
         from src.utils.notifier import Notifier # 临时提供 None，或者你可以从某个上下文获取

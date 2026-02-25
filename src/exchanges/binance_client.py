@@ -134,7 +134,12 @@ class BinanceClient:
         """断开连接，清理资源"""
         if self._socketManager:
             # NOTE: python-binance 的 BinanceSocketManager 没有 stop() 方法。清除引用即可。
-            # 其底层的连接生命周期随 AsyncClient.close_connection() 一起释放。
+            # 增加 hasattr 检查以防未来版本变化或某些特定环境下的意外调用
+            if hasattr(self._socketManager, "stop"):
+                try:
+                    await self._socketManager.stop()
+                except Exception:
+                    pass
             self._socketManager = None
 
         if self._client:
@@ -344,6 +349,9 @@ class BinanceClient:
             return await client.futures_create_order(**params)
         except BinanceAPIException as e:
             raise _toBinanceApiError(e, self._rateLimiter)
+
+    # 别名兼容
+    futures_create_order = futuresCreateOrder
 
     # ==================================================
     # 下单操作
@@ -648,6 +656,7 @@ class BinanceClient:
 
     # 别名兼容：某些策略可能使用 snake_case 调用
     get_klines = getKlines
+    getKlinesHistorical = getKlines
 
     async def getCurrentPrice(self, symbol: str | None = None) -> Decimal:
         """
@@ -661,6 +670,9 @@ class BinanceClient:
             return Decimal(ticker["price"])
         except BinanceAPIException as e:
             raise _toBinanceApiError(e, self._rateLimiter)
+
+    # 别名兼容
+    get_current_price = getCurrentPrice
 
     @retryOnError(maxRetries=2)
     async def getOpenOrdersCount(self) -> int:
