@@ -6,7 +6,7 @@ from src.exchanges.binance_client import BinanceClient, ClientConfig
 from src.models.bot import BotConfig, BotStatus, StrategyType
 from src.models.api_key import ApiKey
 from src.strategies.base_strategy import BaseStrategy
-from src.services.crypto_service import decrypt_api_secret
+from src.services.crypto_service import crypto_service
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -219,8 +219,11 @@ class StrategyManager:
         """
         logger.info("🎬 [StrategyManager] 启动持久化自愈检测，搜索运行中的机器人...")
         
-        # 查询所有活跃状态的机器人
-        stmt = select(BotConfig).where(BotConfig.status == BotStatus.RUNNING).options(selectinload(BotConfig.api_key))
+        # 查询所有活跃状态的机器人，同时预加载 API Key 和 User 及其 DEK
+        stmt = select(BotConfig).where(BotConfig.status == BotStatus.RUNNING).options(
+            selectinload(BotConfig.api_key),
+            selectinload(BotConfig.user)
+        )
         result = await db_session.execute(stmt)
         bots = result.scalars().all()
         
@@ -242,7 +245,11 @@ class StrategyManager:
                     logger.error("❌ Bot [%d] 缺少 API Key 关联，跳过恢复", bot.id)
                     continue
                     
-                secret = decrypt_api_secret(api_key.encrypted_secret)
+                # 使用用户的 DEK 解密该 ApiKey 的 Secret
+                secret = crypto_service.decrypt_user_secret(
+                    bot.user.encrypted_dek, 
+                    api_key.encrypted_secret
+                )
                 
                 # 触发异步启动
                 success = await self.start_bot(bot, api_key.api_key, secret)
