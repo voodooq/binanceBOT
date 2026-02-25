@@ -133,11 +133,8 @@ class BinanceClient:
     async def disconnect(self) -> None:
         """断开连接，清理资源"""
         if self._socketManager:
-            # 必须显式关闭 SocketManager，否则残留的后台线程和旧 asyncio Task 会引发冲突
-            try:
-                self._socketManager.stop()
-            except Exception as e:
-                logger.error("清理旧 SocketManager 失败: %s", e)
+            # NOTE: python-binance 的 BinanceSocketManager 没有 stop() 方法。清除引用即可。
+            # 其底层的连接生命周期随 AsyncClient.close_connection() 一起释放。
             self._socketManager = None
 
         if self._client:
@@ -612,18 +609,20 @@ class BinanceClient:
         self,
         interval: str = "1h",
         limit: int = 50,
+        symbol: str | None = None,
     ) -> list[list]:
         """
         获取 K 线历史数据（带缓存）。
-
         相同参数 60 秒内不重复请求，减少 API 权重消耗。
 
         @param interval K 线周期
         @param limit 获取数量
+        @param symbol 可选交易对 (默认使用初始化时的交易对)
         @returns K 线数据列表
         """
+        target_symbol = symbol or self._settings.tradingSymbol
         import time as _time
-        cacheKey = f"{interval}_{limit}"
+        cacheKey = f"{target_symbol}_{interval}_{limit}"
         now = _time.time()
 
         # 检查缓存
@@ -636,14 +635,30 @@ class BinanceClient:
         client = self._ensureConnected()
         try:
             klines = await client.get_klines(
-                symbol=self._settings.tradingSymbol,
+                symbol=target_symbol,
                 interval=interval,
                 limit=limit,
             )
             # 更新缓存
             self._klinesCache[cacheKey] = (now, klines)
-            logger.debug("获取 %d 根 %s K 线 (已缓存)", len(klines), interval)
+            logger.debug("获取 %s %d 根 %s K 线 (已缓存)", target_symbol, len(klines), interval)
             return klines
+        except BinanceAPIException as e:
+            raise _toBinanceApiError(e, self._rateLimiter)
+
+    # 别名兼容：某些策略可能使用 snake_case 调用
+    get_klines = getKlines
+
+    async def getCurrentPrice(self, symbol: str | None = None) -> Decimal:
+        """
+        获取当前市场价格。
+        [权重 1]
+        """
+        target_symbol = symbol or self._settings.tradingSymbol
+        client = self._ensureConnected()
+        try:
+            ticker = await client.get_symbol_ticker(symbol=target_symbol)
+            return Decimal(ticker["price"])
         except BinanceAPIException as e:
             raise _toBinanceApiError(e, self._rateLimiter)
 

@@ -26,7 +26,7 @@ class MockBinanceClient:
         # NOTE: GridStrategy.__init__ 会引用 client._rateLimiter，回测时不需要限速
         self._rateLimiter = None
 
-    async def getCurrentPrice(self) -> Decimal:
+    async def getCurrentPrice(self, symbol: str | None = None) -> Decimal:
         """获取当前模拟价格 (回测时由引擎注入)"""
         return self.current_price
 
@@ -76,8 +76,11 @@ class MockBinanceClient:
     def formatQuantity(self, quantity: Decimal) -> str:
         return str(round(quantity, self._quantityPrecision))
 
-    async def get_klines(self, **kwargs):
+    async def getKlines(self, symbol: str | None = None, interval: str = "1h", limit: int = 50, **kwargs):
         return []
+    
+    # 别名兼容
+    get_klines = getKlines
 
 class BacktestEngine:
     """
