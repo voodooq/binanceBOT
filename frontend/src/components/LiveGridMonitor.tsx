@@ -1,16 +1,32 @@
-import { useState, useCallback } from "react";
-import { Activity, Zap, Sparkles, Coins } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, AlertTriangle, Coins, RotateCcw, Sparkles, Zap } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useWebSocket } from "@/hooks/useWebSocket";
 
 interface LiveGridMonitorProps {
     bot: any;
+    currentPrice: number | null;
+    isConnected: boolean;
+    connectionStatus: "idle" | "connecting" | "connected" | "reconnecting" | "error";
+    lastMessageAt: number | null;
+    lastProfitEvent: any;
+    profitEventVersion: number;
+    onReconnect: () => void;
 }
 
-export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
-    const [currentPrice, setCurrentPrice] = useState<number | null>(null);
-    const [lastProfitEvent, setLastProfitEvent] = useState<any>(null);
+export function LiveGridMonitor({
+    bot,
+    currentPrice,
+    isConnected,
+    connectionStatus,
+    lastMessageAt,
+    lastProfitEvent,
+    profitEventVersion,
+    onReconnect,
+}: LiveGridMonitorProps) {
+    const [displayPrice, setDisplayPrice] = useState<number | null>(currentPrice);
     const [showProfitAnim, setShowProfitAnim] = useState(false);
+    const animationFrameRef = useRef<number | null>(null);
+    const profitAnimTimerRef = useRef<number | null>(null);
 
     // 解析网格参数
     const lower = parseFloat(bot.parameters?.grid_lower_price || "0");
@@ -18,21 +34,77 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
     const count = parseInt(bot.parameters?.grid_count || "0");
     const step = count > 0 ? (upper - lower) / count : 0;
 
-    // 处理来自 WebSocket 的消息
-    const handleMessage = useCallback((payload: any) => {
-        if (payload.bot_id !== bot.id) return;
+    const isDataStale = useMemo(() => {
+        if (!lastMessageAt) return false;
+        return Date.now() - lastMessageAt > 15000;
+    }, [lastMessageAt]);
 
-        if (payload.type === "PRICE_UPDATE") {
-            setCurrentPrice(payload.data.price);
-        } else if (payload.type === "PROFIT_MATCHED") {
-            setLastProfitEvent(payload.data);
-            setShowProfitAnim(true);
-            // 3秒后自动关闭动画
-            setTimeout(() => setShowProfitAnim(false), 3000);
+    const linkLabel = useMemo(() => {
+        if (isConnected && !isDataStale) return "WS Linked";
+        if (connectionStatus === "reconnecting") return "Reconnecting";
+        if (connectionStatus === "connecting") return "Connecting";
+        if (isDataStale) return "Data Stale";
+        return "Disconnected";
+    }, [connectionStatus, isConnected, isDataStale]);
+
+    useEffect(() => {
+        if (currentPrice === null || Number.isNaN(currentPrice)) {
+            setDisplayPrice(null);
+            return;
         }
-    }, [bot.id]);
 
-    useWebSocket(handleMessage);
+        if (displayPrice === null) {
+            setDisplayPrice(currentPrice);
+            return;
+        }
+
+        if (animationFrameRef.current !== null) {
+            cancelAnimationFrame(animationFrameRef.current);
+        }
+
+        const animate = () => {
+            setDisplayPrice((prev) => {
+                if (prev === null) return currentPrice;
+
+                const delta = currentPrice - prev;
+                if (Math.abs(delta) < 0.0001) {
+                    return currentPrice;
+                }
+
+                const next = prev + delta * 0.18;
+                animationFrameRef.current = requestAnimationFrame(animate);
+                return next;
+            });
+        };
+
+        animationFrameRef.current = requestAnimationFrame(animate);
+
+        return () => {
+            if (animationFrameRef.current !== null) {
+                cancelAnimationFrame(animationFrameRef.current);
+                animationFrameRef.current = null;
+            }
+        };
+    }, [currentPrice]);
+
+    useEffect(() => {
+        if (!profitEventVersion || !lastProfitEvent) return;
+
+        setShowProfitAnim(true);
+        if (profitAnimTimerRef.current !== null) {
+            window.clearTimeout(profitAnimTimerRef.current);
+        }
+        profitAnimTimerRef.current = window.setTimeout(() => {
+            setShowProfitAnim(false);
+        }, 3000);
+
+        return () => {
+            if (profitAnimTimerRef.current !== null) {
+                window.clearTimeout(profitAnimTimerRef.current);
+                profitAnimTimerRef.current = null;
+            }
+        };
+    }, [lastProfitEvent, profitEventVersion]);
 
     if (bot.status?.toUpperCase() !== "RUNNING") {
         return (
@@ -49,38 +121,41 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
         );
     }
 
-    if (currentPrice === null) {
+    if (displayPrice === null) {
         return (
             <div className="flex flex-col h-full bg-zinc-950 rounded-2xl border border-zinc-800 p-6 font-mono">
                 <div className="animate-pulse flex items-center justify-center h-full text-zinc-500">
-                    正在等待 Websocket 行情推送...
+                    正在等待 WebSocket 行情推送...
                 </div>
             </div>
         );
     }
 
+    const safePrice = displayPrice ?? 0;
+    const safeStep = step > 0 ? step : 1;
+
     let nextBuy = 0;
     let nextSell = 0;
     let inRange = false;
 
-    if (currentPrice < lower) {
+    if (safePrice < lower) {
         nextBuy = lower;
-        nextSell = lower + step;
-    } else if (currentPrice > upper) {
-        nextBuy = upper - step;
+        nextSell = lower + safeStep;
+    } else if (safePrice > upper) {
+        nextBuy = upper - safeStep;
         nextSell = upper;
     } else {
         inRange = true;
-        const gridsAboveLower = (currentPrice - lower) / step;
+        const gridsAboveLower = safeStep > 0 ? (safePrice - lower) / safeStep : 0;
         const currentGridIndex = Math.floor(gridsAboveLower);
-        nextBuy = lower + currentGridIndex * step;
-        nextSell = lower + (currentGridIndex + 1) * step;
+        nextBuy = lower + currentGridIndex * safeStep;
+        nextSell = lower + (currentGridIndex + 1) * safeStep;
     }
 
-    const distBuy = Math.max(0, currentPrice - nextBuy);
-    const distSell = Math.max(0, nextSell - currentPrice);
-    const buyPercent = (distBuy / currentPrice) * 100;
-    const sellPercent = (distSell / currentPrice) * 100;
+    const distBuy = Math.max(0, safePrice - nextBuy);
+    const distSell = Math.max(0, nextSell - safePrice);
+    const buyPercent = safePrice > 0 ? (distBuy / safePrice) * 100 : 0;
+    const sellPercent = safePrice > 0 ? (distSell / safePrice) * 100 : 0;
 
     return (
         <div className="flex flex-col h-full bg-zinc-950 rounded-2xl border border-zinc-800 overflow-hidden font-mono text-sm relative shadow-2xl">
@@ -144,15 +219,25 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
                     <span className="font-bold uppercase tracking-wider text-zinc-200">实时水位监测仪 (V3)</span>
                 </div>
                 <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest">WS Linked</span>
+                    <div
+                        className={`w-2 h-2 rounded-full ${
+                            isConnected && !isDataStale
+                                ? "bg-green-500 animate-pulse"
+                                : connectionStatus === "reconnecting" || connectionStatus === "connecting"
+                                ? "bg-amber-500 animate-pulse"
+                                : "bg-red-500"
+                        }`}
+                    />
+                    <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest">
+                        {linkLabel}
+                    </span>
                 </div>
             </div>
 
             <div className="flex-1 p-8 flex flex-col justify-center space-y-10 relative">
                 {/* Upper Status */}
                 <AnimatePresence>
-                    {!inRange && currentPrice > upper && (
+                    {!inRange && safePrice > upper && (
                         <motion.div
                             initial={{ y: -20, opacity: 0 }}
                             animate={{ y: 0, opacity: 1 }}
@@ -171,7 +256,8 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
                     </div>
                     <div className="h-2 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800">
                         <motion.div
-                            animate={{ width: `${Math.min(100, (1 - distSell / step) * 100)}%` }}
+                            animate={{ width: `${Math.min(100, Math.max(0, (1 - distSell / safeStep) * 100))}%` }}
+                            transition={{ duration: 0.2, ease: "easeOut" }}
                             className="h-full bg-gradient-to-r from-red-500/10 to-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]"
                         />
                     </div>
@@ -187,12 +273,12 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
                     <span className="text-zinc-600 text-[10px] mb-2 uppercase tracking-[0.3em] font-black">MARKET PRICE</span>
                     <div className="flex items-baseline gap-2">
                         <motion.span
-                            key={currentPrice}
+                            key={displayPrice?.toFixed(4)}
                             initial={{ opacity: 0.5 }}
                             animate={{ opacity: 1 }}
                             className="text-6xl font-black text-white tracking-tighter"
                         >
-                            {currentPrice.toFixed(4)}
+                            {displayPrice.toFixed(4)}
                         </motion.span>
                         <span className="text-zinc-500 font-bold">USDT</span>
                     </div>
@@ -206,7 +292,8 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
                     </div>
                     <div className="h-2 bg-zinc-900 rounded-full overflow-hidden flex justify-end border border-zinc-800">
                         <motion.div
-                            animate={{ width: `${Math.min(100, (1 - distBuy / step) * 100)}%` }}
+                            animate={{ width: `${Math.min(100, Math.max(0, (1 - distBuy / safeStep) * 100))}%` }}
+                            transition={{ duration: 0.2, ease: "easeOut" }}
                             className="h-full bg-gradient-to-l from-green-500/10 to-green-500 shadow-[0_0_10px_rgba(34,197,94,0.3)]"
                         />
                     </div>
@@ -218,7 +305,7 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
 
                 {/* Lower Status */}
                 <AnimatePresence>
-                    {!inRange && currentPrice < lower && (
+                    {!inRange && safePrice < lower && (
                         <motion.div
                             initial={{ y: 20, opacity: 0 }}
                             animate={{ y: 0, opacity: 1 }}
@@ -231,13 +318,34 @@ export function LiveGridMonitor({ bot }: LiveGridMonitorProps) {
             </div>
 
             <div className="px-6 py-3 bg-zinc-900/30 border-t border-zinc-800 flex justify-between items-center text-[10px] text-zinc-600 font-bold">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                     <span className="flex items-center gap-1"><div className="w-1 h-1 rounded-full bg-zinc-700" /> RANGE: {lower} - {upper}</span>
                     <span className="flex items-center gap-1"><div className="w-1 h-1 rounded-full bg-zinc-700" /> GRIDS: {count}</span>
+                    <span className="flex items-center gap-1">
+                        <div className="w-1 h-1 rounded-full bg-zinc-700" />
+                        LAST UPDATE: {lastMessageAt ? new Date(lastMessageAt).toLocaleTimeString() : "--"}
+                    </span>
                 </div>
-                <div className="flex items-center gap-1">
-                    <Activity className="w-3 h-3" />
-                    ENGINE ACTIVE
+                <div className="flex items-center gap-3">
+                    {isDataStale && (
+                        <span className="flex items-center gap-1 text-amber-400">
+                            <AlertTriangle className="w-3 h-3" />
+                            DATA STALE
+                        </span>
+                    )}
+                    {!isConnected && (
+                        <button
+                            onClick={onReconnect}
+                            className="flex items-center gap-1 text-zinc-300 hover:text-white transition-colors"
+                        >
+                            <RotateCcw className="w-3 h-3" />
+                            RETRY
+                        </button>
+                    )}
+                    <div className="flex items-center gap-1">
+                        <Activity className="w-3 h-3" />
+                        ENGINE ACTIVE
+                    </div>
                 </div>
             </div>
         </div>
