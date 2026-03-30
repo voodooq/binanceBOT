@@ -6,108 +6,93 @@ import time
 
 import pytest
 
-from src.utils.rate_limiter import TokenBucket, RateLimiter
-
-
-@pytest.fixture
-def eventLoop():
-    """提供事件循环"""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+from src.utils.error_handler import ApiError
+from src.utils.rate_limiter import RateLimiter, TokenBucket, get_shared_rate_limiter
 
 
 class TestTokenBucket:
     """令牌桶单元测试"""
 
     @pytest.mark.asyncio
-    async def test_initialTokens(self) -> None:
+    async def test_initial_tokens(self) -> None:
         """初始化后桶应满令牌"""
         bucket = TokenBucket(capacity=100, refillRate=10)
-        # 消耗 100 个令牌应立即成功
         await bucket.acquire(100)
 
     @pytest.mark.asyncio
-    async def test_consumeTokens(self) -> None:
+    async def test_consume_tokens(self) -> None:
         """消耗令牌后桶内余量应减少"""
         bucket = TokenBucket(capacity=10, refillRate=1)
         await bucket.acquire(5)
-        # 剩余 5 个，再消耗 5 个应成功
         await bucket.acquire(5)
 
     @pytest.mark.asyncio
-    async def test_waitWhenEmpty(self) -> None:
+    async def test_wait_when_empty(self) -> None:
         """桶空时应等待令牌补充"""
-        bucket = TokenBucket(capacity=1, refillRate=100)  # 每秒补充 100 个
+        bucket = TokenBucket(capacity=1, refillRate=100)
         await bucket.acquire(1)
 
-        # 令牌已空，再次消耗应等待一小段时间
         start = time.monotonic()
         await bucket.acquire(1)
         elapsed = time.monotonic() - start
 
-        # 补充速率 100/秒，等待 1 个令牌约需 0.01 秒，给 0.5 秒的宽容度
         assert elapsed < 0.5
 
     @pytest.mark.asyncio
     async def test_calibrate(self) -> None:
         """校准应调整桶内令牌"""
         bucket = TokenBucket(capacity=100, refillRate=10)
-        # 校准 — 已用 80，剩余应为 20
         bucket.calibrate(80)
-        # 应能消耗 20 个
         await bucket.acquire(20)
 
     @pytest.mark.asyncio
-    async def test_refillDoesNotExceedCapacity(self) -> None:
+    async def test_refill_does_not_exceed_capacity(self) -> None:
         """补充不应超过桶容量"""
         bucket = TokenBucket(capacity=10, refillRate=1000)
         await bucket.acquire(10)
         await asyncio.sleep(0.1)
-        # 即使补充速率很高，桶内令牌不应超过容量
         await bucket.acquire(10)
-        # 如果超过容量，这里会失败
+
+    def test_invalid_capacity_raises(self) -> None:
+        with pytest.raises(ValueError, match="capacity"):
+            TokenBucket(capacity=0, refillRate=1)
+
+    def test_invalid_refill_rate_raises(self) -> None:
+        with pytest.raises(ValueError, match="refillRate"):
+            TokenBucket(capacity=1, refillRate=0)
 
 
 class TestRateLimiter:
     """速率限制器集成测试"""
 
     @pytest.mark.asyncio
-    async def test_acquireWeight(self) -> None:
-        """权重获取应正常工作"""
+    async def test_acquire_weight(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
-        # 应能连续获取多个权重
         for _ in range(10):
             await limiter.acquireWeight(5)
 
     @pytest.mark.asyncio
-    async def test_acquireOrderSlot(self) -> None:
-        """订单名额获取应正常工作"""
+    async def test_acquire_order_slot(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
         for _ in range(10):
             await limiter.acquireOrderSlot()
 
     @pytest.mark.asyncio
-    async def test_calibrateWeight(self) -> None:
-        """权重校准不应抛出异常"""
+    async def test_calibrate_weight(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
         limiter.calibrateWeight(50)
 
     @pytest.mark.asyncio
-    async def test_getUsageRatio(self) -> None:
-        """使用率应反映实际消耗"""
+    async def test_get_usage_ratio(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
-        # 初始使用率应接近 0
         assert limiter.getUsageRatio() < 0.1
 
-        # 消耗 80 权重后，使用率应接近 0.8
         await limiter.acquireWeight(80)
         ratio = limiter.getUsageRatio()
         assert 0.7 < ratio < 0.9
 
     @pytest.mark.asyncio
-    async def test_isInWarningZone(self) -> None:
-        """消耗 80% 以上时应进入警戒区"""
+    async def test_is_in_warning_zone(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
         assert limiter.isInWarningZone is False
 
@@ -115,10 +100,44 @@ class TestRateLimiter:
         assert limiter.isInWarningZone is True
 
     @pytest.mark.asyncio
-    async def test_isInCircuitBreaker(self) -> None:
-        """消耗 95% 以上时应进入熔断区"""
+    async def test_is_in_circuit_breaker(self) -> None:
         limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
         assert limiter.isInCircuitBreaker is False
 
         await limiter.acquireWeight(96)
         assert limiter.isInCircuitBreaker is True
+
+    @pytest.mark.asyncio
+    async def test_hard_circuit_breaker_blocks_acquire_weight(self) -> None:
+        limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
+        limiter.triggerHardCircuitBreaker(duration=60)
+
+        assert limiter.isHardCircuitBroken is True
+        assert limiter.isInCircuitBreaker is True
+
+        with pytest.raises(ApiError) as exc_info:
+            await limiter.acquireWeight(1)
+
+        assert exc_info.value.code == -1003
+
+    @pytest.mark.asyncio
+    async def test_acquire_weight_with_protection_returns_circuit_breaker(self) -> None:
+        limiter = RateLimiter(weightCapacity=100, orderCapacity=10)
+        limiter.triggerHardCircuitBreaker(duration=60)
+
+        status = await limiter.acquireWeightWithProtection(1)
+        assert status == "circuit_breaker"
+
+
+class TestSharedRateLimiter:
+    """共享限流器测试"""
+
+    def test_same_scope_returns_same_instance(self) -> None:
+        limiter_a = get_shared_rate_limiter("scope-a")
+        limiter_b = get_shared_rate_limiter("scope-a")
+        assert limiter_a is limiter_b
+
+    def test_different_scope_returns_different_instance(self) -> None:
+        limiter_a = get_shared_rate_limiter("scope-a-1")
+        limiter_b = get_shared_rate_limiter("scope-b-1")
+        assert limiter_a is not limiter_b

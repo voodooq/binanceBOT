@@ -6,100 +6,151 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.config.binance_config import Settings
-from src.strategies.grid_strategy import GridStrategy, GridOrder, GridSide, OrderStatus
+import src.strategies.grid_strategy as grid_strategy_module
+from src.models.bot import BotConfig, BotStatus, StrategyType
+from src.strategies.grid_strategy import GridOrder, GridSide, GridStrategy, OrderStatus
 
 
-def _makeSettings(**overrides) -> Settings:
-    """创建测试用 Settings 实例"""
-    defaults = {
-        "apiKey": "test_key_1234",
-        "apiSecret": "test_secret_1234",
-        "useTestnet": True,
-        "tradingSymbol": "BTCUSDT",
-        "gridUpperPrice": Decimal("70000"),
-        "gridLowerPrice": Decimal("60000"),
-        "gridCount": 10,
-        "gridInvestmentPerGrid": Decimal("10"),
-        "stopLossPercent": Decimal("0.05"),
-        "takeProfitAmount": Decimal("100"),
-        "maxSpreadPercent": Decimal("0.001"),
-        "reserveRatio": Decimal("0.1"),
+def _make_bot_config(**parameter_overrides) -> BotConfig:
+    parameters = {
+        "grid_lower_price": "60000",
+        "grid_upper_price": "70000",
+        "grid_count": 10,
+        "grid_investment_per_grid": "10",
+        "reserve_ratio": "0.1",
+        "adaptive_mode": False,
+        "analysis_interval": 15,
+        "max_spread_percent": "0.001",
+        "max_order_count": 50,
+        "max_position_ratio": "0.95",
+        "stop_loss_percent": "0.05",
+        "take_profit_amount": "100",
+        "martin_multiplier": "1.5",
+        "max_martin_levels": 3,
+        "trade_cooldown": 0,
+        "stale_data_timeout": 300,
+        "max_drawdown": "0.2",
     }
-    defaults.update(overrides)
-    return Settings(**defaults)
+    parameters.update(parameter_overrides)
+
+    bot = BotConfig(
+        user_id=1,
+        api_key_id=1,
+        name="Test Grid Bot",
+        symbol="BTCUSDT",
+        strategy_type=StrategyType.GRID,
+        status=BotStatus.IDLE,
+        parameters=parameters,
+        base_asset="BTC",
+        quote_asset="USDT",
+        total_investment=Decimal("1000"),
+        total_pnl=Decimal("0"),
+        is_testnet=True,
+    )
+    bot.id = 1
+    return bot
 
 
-def _makeStrategy(settings: Settings | None = None) -> GridStrategy:
-    """创建带 Mock 依赖的策略实例"""
-    if settings is None:
-        settings = _makeSettings()
+def _make_client() -> MagicMock:
+    client = MagicMock()
+    client.is_mock = True
 
-    mockClient = AsyncMock()
-    mockClient.getFreeBalance = AsyncMock(return_value=Decimal("1000"))
-    mockClient.getBidAskSpread = AsyncMock(return_value=Decimal("0.0001"))
-    mockClient.createLimitOrder = AsyncMock(return_value={"orderId": 12345})
-    mockClient.cancelAllOrders = AsyncMock(return_value=[])
-    mockClient.createMarketOrder = AsyncMock(return_value={"orderId": 99999})
+    async def _get_balance(asset: str = "USDT") -> Decimal:
+        if asset == "USDT":
+            return Decimal("1000")
+        return Decimal("0")
 
-    # V3.0: GridStrategy 通过 client._rateLimiter 获取引用
-    mockRateLimiter = MagicMock()
-    mockRateLimiter.isInCircuitBreaker = False
-    mockRateLimiter.isInWarningZone = False
-    mockClient._rateLimiter = mockRateLimiter
+    client.getFreeBalance = AsyncMock(side_effect=_get_balance)
+    client.getBidAskSpread = AsyncMock(return_value=Decimal("0.0001"))
+    client.createLimitOrder = AsyncMock(return_value={"orderId": 12345})
+    client.cancelAllOrders = AsyncMock(return_value=[])
+    client.createMarketOrder = AsyncMock(return_value={"orderId": 99999})
+    client.getTotalPositionValue = AsyncMock(return_value=(Decimal("0"), Decimal("1000")))
+    client.getCurrentPrice = AsyncMock(return_value=Decimal("65000"))
+    client.getKlines = AsyncMock(return_value=[])
+    client.get_klines = AsyncMock(return_value=[])
+    client.nuke_all_orders = AsyncMock(return_value=None)
+    client.getOpenOrders = AsyncMock(return_value=[])
+    client.formatQuantity = MagicMock(side_effect=lambda qty: str(Decimal(str(qty))))
+    client.minNotional = Decimal("10")
+    client._minNotional = Decimal("10")
 
-    mockNotifier = MagicMock()
-    mockNotifier.notify = MagicMock()
-    mockNotifier.sendImmediate = AsyncMock(return_value=True)
+    mock_rate_limiter = MagicMock()
+    mock_rate_limiter.isInCircuitBreaker = False
+    mock_rate_limiter.isInWarningZone = False
+    client._rateLimiter = mock_rate_limiter
+    return client
 
-    return GridStrategy(
-        settings=settings,
-        client=mockClient,
-        notifier=mockNotifier,
+
+def _make_strategy(**parameter_overrides) -> tuple[GridStrategy, MagicMock, MagicMock]:
+    bot_config = _make_bot_config(**parameter_overrides)
+    client = _make_client()
+
+    notifier = MagicMock()
+    notifier.notify = MagicMock()
+    notifier.sendImmediate = AsyncMock(return_value=True)
+
+    with patch("src.utils.notifier.Notifier", return_value=notifier):
+        strategy = GridStrategy(bot_config=bot_config, client=client)
+
+    strategy._notifier = notifier
+    return strategy, client, notifier
+
+
+@pytest.fixture(autouse=True)
+def _patch_external_side_effects(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        grid_strategy_module.notification_service,
+        "send_notification",
+        MagicMock(),
+    )
+    monkeypatch.setattr(
+        grid_strategy_module.redis_bus,
+        "publish_trade_event",
+        AsyncMock(),
     )
 
 
 class TestGridGeneration:
     """网格生成测试"""
 
-    def test_gridPriceCount(self) -> None:
-        """n 格应生成 n+1 个价位"""
-        strategy = _makeStrategy(_makeSettings(gridCount=10))
+    def test_grid_price_count(self) -> None:
+        strategy, _, _ = _make_strategy(grid_count=10)
         prices = strategy.generateGrid()
         assert len(prices) == 11
 
-    def test_gridPriceRange(self) -> None:
-        """最低价 = gridLowerPrice, 最高价 = gridUpperPrice"""
-        settings = _makeSettings(
-            gridLowerPrice=Decimal("1000"),
-            gridUpperPrice=Decimal("2000"),
-            gridCount=5,
+    def test_grid_price_range(self) -> None:
+        strategy, _, _ = _make_strategy(
+            grid_lower_price="1000",
+            grid_upper_price="2000",
+            grid_count=5,
         )
-        strategy = _makeStrategy(settings)
         prices = strategy.generateGrid()
 
         assert prices[0] == Decimal("1000")
         assert prices[-1] == Decimal("2000")
 
-    def test_gridStepSize(self) -> None:
-        """网格应等差分布"""
-        settings = _makeSettings(
-            gridLowerPrice=Decimal("100"),
-            gridUpperPrice=Decimal("200"),
-            gridCount=4,
+    def test_grid_step_size(self) -> None:
+        strategy, _, _ = _make_strategy(
+            grid_lower_price="100",
+            grid_upper_price="200",
+            grid_count=4,
         )
-        strategy = _makeStrategy(settings)
         prices = strategy.generateGrid()
 
-        # 步长应为 25
         for i in range(1, len(prices)):
             assert prices[i] - prices[i - 1] == Decimal("25")
+
+    def test_invalid_grid_count_raises(self) -> None:
+        strategy, _, _ = _make_strategy(grid_count=0)
+        with pytest.raises(ValueError, match="grid_count"):
+            strategy.generateGrid()
 
 
 class TestGridOrder:
     """GridOrder 序列化/反序列化测试"""
 
-    def test_toDict(self) -> None:
+    def test_to_dict(self) -> None:
         order = GridOrder(
             gridIndex=3,
             price=Decimal("65000"),
@@ -108,14 +159,13 @@ class TestGridOrder:
             orderId=12345,
             status=OrderStatus.PENDING,
         )
-        d = order.toDict()
-        assert d["gridIndex"] == 3
-        assert d["price"] == "65000"
-        assert d["side"] == "BUY"
-        assert d["orderId"] == 12345
+        data = order.toDict()
+        assert data["gridIndex"] == 3
+        assert data["price"] == "65000"
+        assert data["side"] == "BUY"
+        assert data["orderId"] == 12345
 
-    def test_roundTrip(self) -> None:
-        """序列化后反序列化应得到等价对象"""
+    def test_round_trip(self) -> None:
         original = GridOrder(
             gridIndex=5,
             price=Decimal("67500.50"),
@@ -133,33 +183,29 @@ class TestGridOrder:
         assert restored.status == original.status
 
 
-class TestStopLoss:
-    """止损逻辑测试"""
+class TestRiskControls:
+    """止损止盈逻辑测试"""
 
     @pytest.mark.asyncio
-    async def test_stopLossTriggered(self) -> None:
-        """价格跌破止损线应触发紧急退出"""
-        settings = _makeSettings(
-            gridLowerPrice=Decimal("60000"),
-            stopLossPercent=Decimal("0.05"),
+    async def test_stop_loss_triggered(self) -> None:
+        strategy, _, notifier = _make_strategy(
+            grid_lower_price="60000",
+            stop_loss_percent="0.05",
         )
-        strategy = _makeStrategy(settings)
         strategy.generateGrid()
         strategy._running = True
 
-        # 止损线 = 60000 * (1 - 0.05) = 57000
         triggered = await strategy._checkStopLoss(Decimal("56999"))
         assert triggered is True
         assert strategy._running is False
+        notifier.sendImmediate.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_stopLossNotTriggered(self) -> None:
-        """价格在止损线之上不应触发"""
-        settings = _makeSettings(
-            gridLowerPrice=Decimal("60000"),
-            stopLossPercent=Decimal("0.05"),
+    async def test_stop_loss_not_triggered(self) -> None:
+        strategy, _, _ = _make_strategy(
+            grid_lower_price="60000",
+            stop_loss_percent="0.05",
         )
-        strategy = _makeStrategy(settings)
         strategy.generateGrid()
         strategy._running = True
 
@@ -167,29 +213,105 @@ class TestStopLoss:
         assert triggered is False
         assert strategy._running is True
 
-
-class TestTakeProfit:
-    """止盈逻辑测试"""
-
     @pytest.mark.asyncio
-    async def test_takeProfitTriggered(self) -> None:
-        """累计利润达到目标应触发止盈"""
-        settings = _makeSettings(takeProfitAmount=Decimal("100"))
-        strategy = _makeStrategy(settings)
+    async def test_take_profit_triggered(self) -> None:
+        strategy, _, notifier = _make_strategy(take_profit_amount="100")
         strategy.generateGrid()
         strategy._running = True
         strategy._realizedProfit = Decimal("100")
 
         triggered = await strategy._checkTakeProfit()
         assert triggered is True
+        assert strategy._running is False
+        notifier.sendImmediate.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_takeProfitNotTriggered(self) -> None:
-        """累计利润未达标不应触发"""
-        settings = _makeSettings(takeProfitAmount=Decimal("100"))
-        strategy = _makeStrategy(settings)
+    async def test_take_profit_not_triggered(self) -> None:
+        strategy, _, _ = _make_strategy(take_profit_amount="100")
         strategy._running = True
         strategy._realizedProfit = Decimal("50")
 
         triggered = await strategy._checkTakeProfit()
         assert triggered is False
+
+
+class TestOrderUpdates:
+    """订单回调兼容性测试"""
+
+    @pytest.mark.asyncio
+    async def test_buy_fill_uses_backtest_fallback_fields(self) -> None:
+        strategy, _, _ = _make_strategy()
+        strategy.generateGrid()
+
+        buy_order = GridOrder(
+            gridIndex=2,
+            price=Decimal("65000"),
+            side=GridSide.BUY,
+            quantity=Decimal("0.01"),
+            orderId="mock_buy_1",
+            status=OrderStatus.PENDING,
+        )
+        strategy._orders[buy_order.price] = buy_order
+        strategy._placeSellOrder = AsyncMock()
+
+        event = {
+            "i": "mock_buy_1",
+            "X": "FILLED",
+            "S": "BUY",
+            "p": "65100",
+            "q": "0.01",
+        }
+
+        await strategy.on_order_update(event)
+
+        strategy._placeSellOrder.assert_awaited_once_with(
+            gridIndex=2,
+            buyPrice=Decimal("65100"),
+            quantity=Decimal("0.01"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_sell_fill_calculates_profit_with_backtest_fields(self) -> None:
+        strategy, _, _ = _make_strategy()
+        strategy.generateGrid()
+
+        entry_price = Decimal("65000")
+        sell_price = Decimal("66000")
+        quantity = Decimal("0.01")
+
+        sell_order = GridOrder(
+            gridIndex=3,
+            price=sell_price,
+            side=GridSide.SELL,
+            quantity=quantity,
+            orderId="mock_sell_1",
+            status=OrderStatus.PENDING,
+            entryPrice=entry_price,
+        )
+        linked_buy_order = GridOrder(
+            gridIndex=3,
+            price=entry_price,
+            side=GridSide.BUY,
+            quantity=quantity,
+            orderId="mock_buy_linked",
+            status=OrderStatus.FILLED,
+        )
+        strategy._orders[sell_order.price] = sell_order
+        strategy._orders[linked_buy_order.price] = linked_buy_order
+
+        event = {
+            "i": "mock_sell_1",
+            "X": "FILLED",
+            "S": "SELL",
+            "p": "66000",
+            "q": "0.01",
+            "commission": "0.05",
+            "commissionAsset": "USDT",
+        }
+
+        await strategy.on_order_update(event)
+
+        assert strategy._realizedProfit == Decimal("10")
+        assert sell_price not in strategy._orders
+        assert entry_price not in strategy._orders
+        grid_strategy_module.redis_bus.publish_trade_event.assert_awaited_once()

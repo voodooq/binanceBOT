@@ -36,5 +36,6 @@ class Trade(Base):
     status = Column(Enum(OrderStatus, name="order_status_enum"), nullable=False, default=OrderStatus.NEW)
     fee = Column(Numeric(20, 8), nullable=True, default=0.0)
     fee_asset = Column(String(20), nullable=True)
+    realized_profit = Column(Numeric(20, 8), nullable=False, default=0.0) # 针对 SELL 订单记录套利利润
 
     bot_config = relationship("BotConfig", back_populates="trades")

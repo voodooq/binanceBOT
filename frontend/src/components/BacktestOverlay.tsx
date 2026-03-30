@@ -39,10 +39,7 @@ export function BacktestOverlay({ isOpen, onClose, botData }: BacktestOverlayPro
         try {
             // 注意：因为机器人还没创建，我们需要通过一个特殊的“临时回测”接口或传递完整参数
             // 这里我们假设后端支持传递完整配置进行回测，或者我们直接复用 /run (需要 mock bot_id = 0)
-            const resp = await api.post("/backtest/run?bot_id=0", {
-                ...botData,
-                days: days,
-            });
+            const resp = await api.post(`/backtest/run?bot_id=0&days=${days}`, botData);
             setResults(resp.data);
         } catch (error) {
             console.error("回测失败:", error);

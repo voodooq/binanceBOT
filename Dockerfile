@@ -18,8 +18,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制整个源码目录
 COPY . .
 
+# 复制启动脚本
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
 # 创建必要的持久化目录
 RUN mkdir -p /app/state /app/logs
 
-# 启动命令使用 uvicorn 运行 src.main:app
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令使用启动脚本
+ENTRYPOINT ["./entrypoint.sh"]

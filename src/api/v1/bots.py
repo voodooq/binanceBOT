@@ -13,6 +13,7 @@ from src.schemas.bot import BotConfigCreate, BotConfigUpdate, BotConfigResponse,
 from src.engine.strategy_manager import strategy_manager
 from src.services.crypto_service import crypto_service
 from src.models.api_key import ApiKey
+from src.core.config import settings
 
 router = APIRouter()
 
@@ -30,7 +31,18 @@ async def create_bot(
     
     if not api_key:
         raise HTTPException(status_code=404, detail="绑定的 API Key 不存在或无权访问")
-        
+
+    if not api_key.is_active:
+        raise HTTPException(status_code=400, detail="绑定的 API Key 已停用")
+
+    if api_key.is_testnet != bot_in.is_testnet:
+        raise HTTPException(status_code=400, detail="机器人环境与 API Key 环境不一致")
+
+    try:
+        settings.assert_trading_allowed(is_testnet=bot_in.is_testnet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     bot_config = BotConfig(
         user_id=current_user.id,
         api_key_id=bot_in.api_key_id,
@@ -82,23 +94,36 @@ async def start_bot(
     if bot.status == BotStatus.RUNNING:
         raise HTTPException(status_code=400, detail="该机器人已在运行中")
 
+    try:
+        settings.assert_trading_allowed(is_testnet=bot.is_testnet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # 获取关联的 API Key 和解密
-    query_key = select(ApiKey).where(ApiKey.id == bot.api_key_id)
+    query_key = select(ApiKey).where(ApiKey.id == bot.api_key_id, ApiKey.user_id == current_user.id)
     key_result = await db.execute(query_key)
     api_key = key_result.scalar_one_or_none()
     
     if not api_key:
         raise HTTPException(status_code=400, detail="绑定的 API Key 已被删除")
-        
-    try:
-        # NOTE: 使用 CryptoService 的正确方法签名
-        api_secret_str = crypto_service.decrypt_user_secret(
-            current_user.encrypted_dek, api_key.encrypted_secret
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="解密 API Secret 失败，请检查 DEK 连通性")
 
-        
+    if not api_key.is_active:
+        raise HTTPException(status_code=400, detail="绑定的 API Key 已停用")
+
+    if api_key.is_testnet != bot.is_testnet:
+        raise HTTPException(status_code=400, detail="机器人环境与 API Key 环境不一致")
+
+    if not current_user.encrypted_dek:
+        raise HTTPException(status_code=500, detail="账号加密上下文异常，无法启动机器人")
+
+    try:
+        api_secret_str = crypto_service.decrypt_user_secret(
+            current_user.encrypted_dek,
+            api_key.encrypted_secret,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="解密 API Secret 失败，请检查加密环境") from exc
+
     # 调用大盘 StrategyManager 调度此实例
     success = await strategy_manager.start_bot(bot, api_key_str=api_key.api_key, api_secret_str=api_secret_str)
     
@@ -233,14 +258,14 @@ async def list_bot_trades(
             "bot_id": t.bot_config_id,
             "exchange_order_id": t.exchange_order_id or "local",
             "symbol": t.symbol,
-            "side": t.side.value if hasattr(t.side, "value") else str(t.side),
+            "side": (t.side.value if hasattr(t.side, "value") else str(t.side)).upper(),
             "status": t.status.value if hasattr(t.status, "value") else str(t.status),
             "price": t.price,
-            "qty": t.quantity,
-            "quote_qty": t.price * t.quantity,
+            "qty": t.executed_qty,
+            "quote_qty": t.price * t.executed_qty,
             "commission": t.fee,
             "commission_asset": t.fee_asset,
-            "realized_profit": 0.0, # 待后续引擎接入单笔利润计算
+            "realized_profit": t.realized_profit,
             "created_at": t.created_at
         })
     return trades_resp

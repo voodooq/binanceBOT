@@ -35,7 +35,7 @@ class NotificationSetting(Base):
     """
     __tablename__ = "notification_settings"
 
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     
     # 渠道开关
     telegram_enabled = Column(Boolean, default=False)

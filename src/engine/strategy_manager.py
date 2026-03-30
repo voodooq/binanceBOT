@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, Type
+from typing import Any, Dict, Type
 
 from src.exchanges.binance_client import BinanceClient, ClientConfig
 from src.models.bot import BotConfig, BotStatus, StrategyType
@@ -15,6 +15,8 @@ from src.strategies.grid_strategy import GridStrategy
 from src.strategies.hedge_strategy import HedgeStrategy
 from src.services.geo_check_service import geo_check_service
 from src.engine.proxy_scheduler import proxy_scheduler
+from src.services.notification_service import notification_service, NotificationLevel
+from src.utils.rate_limiter import get_shared_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ class StrategyManager:
     def __init__(self):
         # 存储正在运行的机器人的 task 和对应的 strategy 实例
         # key: bot_config.id, value: { "task": asyncio.Task, "strategy": BaseStrategy }
-        self._active_bots: Dict[int, Dict[str, any]] = {}
+        self._active_bots: Dict[int, Dict[str, Any]] = {}
         
         # 策略类型 -> 策略实现类的映射表
         self._strategy_registry: Dict[StrategyType, Type[BaseStrategy]] = {
@@ -37,6 +39,13 @@ class StrategyManager:
     def register_strategy(self, strategy_type: StrategyType, strategy_class: Type[BaseStrategy]):
         """注册具体策略路由"""
         self._strategy_registry[strategy_type] = strategy_class
+
+    def _build_rate_limiter_scope(self, bot_config: BotConfig, api_key_str: str) -> str:
+        api_key_id = getattr(bot_config, "api_key_id", 0) or 0
+        if api_key_id:
+            return f"binance_api_key_id:{api_key_id}"
+        key_suffix = (api_key_str or "")[-8:] or "unknown"
+        return f"binance_api_key_suffix:{key_suffix}"
 
     async def start_bot(self, bot_config: BotConfig, api_key_str: str, api_secret_str: str) -> bool:
         """
@@ -65,7 +74,8 @@ class StrategyManager:
         try:
             # 1. 初始化客户端连接池代理/凭据
             # V3.0 多租户架构：优先使用机器人参数中的固定代理，如无则由调度器按最小负载分配
-            proxy = bot_config.parameters.get("proxy")
+            bot_parameters = bot_config.parameters if isinstance(bot_config.parameters, dict) else {}
+            proxy = bot_parameters.get("proxy")
             is_auto_proxy = False
             
             if not proxy:
@@ -89,8 +99,9 @@ class StrategyManager:
                 proxy=proxy
             )
             
-            from src.utils.rate_limiter import RateLimiter
-            rate_limiter = RateLimiter() # 为每个机器人独立分配速率桶（或稍后改造为连接池级共享）
+            rate_limiter = get_shared_rate_limiter(
+                self._build_rate_limiter_scope(bot_config, api_key_str)
+            )
             
             client = BinanceClient(config=client_config, rateLimiter=rate_limiter)
             await client.connect()
@@ -115,8 +126,10 @@ class StrategyManager:
             logger.info("🟢 Bot [%d] 启动成功 (策略: %s, 代理: %s)", bot_id, bot_config.strategy_type.value, proxy or "DIRECT")
             return True
 
-        except Exception as e:
-            logger.exception("💥 Bot [%d] 启动时发生异常: %s", bot_id, str(e))
+        except Exception:
+            if is_auto_proxy and proxy:
+                proxy_scheduler.release_proxy(proxy)
+            logger.exception("💥 Bot [%d] 启动时发生异常", bot_id)
             return False
 
     async def _run_bot_loop(self, bot_id: int, strategy: BaseStrategy, client: BinanceClient) -> None:
@@ -178,7 +191,7 @@ class StrategyManager:
             
         return True
 
-    async def panic_close_bot(self, bot_id: int) -> dict[str, any]:
+    async def panic_close_bot(self, bot_id: int) -> dict[str, Any]:
         """
         触发机器人的一键平仓。
         首先通过策略的专属方法安全撤单和清算可用余额，然后安全卸载其运行协程。

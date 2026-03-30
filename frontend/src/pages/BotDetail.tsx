@@ -304,9 +304,9 @@ export default function BotDetail() {
                                                 <td className="px-4 py-3">
                                                     <span className={cn(
                                                         "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                                                        trade.side === "BUY" ? "bg-green-500/10 text-green-500" : "bg-red-500/10 text-red-500"
+                                                        trade.side.toUpperCase() === "BUY" ? "bg-green-500/10 text-green-500" : "bg-red-500/10 text-red-500"
                                                     )}>
-                                                        {trade.side === "BUY" ? "买入" : "卖出"}
+                                                        {trade.side.toUpperCase() === "BUY" ? "买入" : "卖出"}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3 font-mono">

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
+from src.core.config import settings
 from src.utils.rate_limiter import RateLimiter
 from src.engine.stream_aggregator import stream_aggregator
 from src.utils.error_handler import (
@@ -82,7 +83,7 @@ class BinanceClient:
 
         # K 线缓存：减少 API 权重消耗
         self._klinesCache: dict[str, tuple[float, list]] = {}
-        _KLINE_CACHE_TTL = 60  # 缓存有效期（秒）
+        self._klineCacheTTL: int = 60  # 缓存有效期（秒）
 
         # 订单 ID 前缀，用于重启后识别自己的挂单
         self._orderIdPrefix = "GRID_V2_"  # 最小下单金额
@@ -232,6 +233,76 @@ class BinanceClient:
         quantize = Decimal(10) ** -self._quantityPrecision
         return str(quantity.quantize(quantize, rounding=ROUND_DOWN))
 
+    @property
+    def minNotional(self) -> Decimal:
+        return self._minNotional
+
+    @property
+    def minQty(self) -> Decimal:
+        return self._minQty
+
+    @property
+    def tradingSymbol(self) -> str:
+        return self._settings.tradingSymbol
+
+    def _normalize_order_side(self, side: str) -> str:
+        normalized = str(side or "").upper()
+        if normalized not in {"BUY", "SELL"}:
+            raise InvalidOrderError("side 必须为 BUY 或 SELL")
+        return normalized
+
+    def _assert_trading_allowed(self) -> None:
+        settings.assert_trading_allowed(is_testnet=self._settings.useTestnet)
+
+    def _validate_order_values(
+        self,
+        *,
+        side: str,
+        quantity: Decimal | None = None,
+        price: Decimal | None = None,
+        quoteQuantity: Decimal | None = None,
+    ) -> tuple[str, Decimal | None, Decimal | None, Decimal | None]:
+        normalized_side = self._normalize_order_side(side)
+
+        if quantity is not None and quantity <= 0:
+            raise InvalidOrderError("订单数量必须大于 0")
+
+        if quoteQuantity is not None and quoteQuantity <= 0:
+            raise InvalidOrderError("quoteOrderQty 必须大于 0")
+
+        if price is not None and price <= 0:
+            raise InvalidOrderError("订单价格必须大于 0")
+
+        normalized_quantity = None
+        if quantity is not None:
+            normalized_quantity = Decimal(self.formatQuantity(quantity))
+            if normalized_quantity <= 0:
+                raise InvalidOrderError("订单数量格式化后为 0")
+            if normalized_quantity < self._minQty:
+                raise InvalidOrderError(
+                    f"订单数量 {normalized_quantity} 小于交易所最小下单数量 {self._minQty}"
+                )
+
+        normalized_price = None
+        if price is not None:
+            normalized_price = Decimal(self.formatPrice(price))
+            if normalized_price <= 0:
+                raise InvalidOrderError("订单价格格式化后为 0")
+
+        if normalized_quantity is not None and normalized_price is not None:
+            notional = normalized_quantity * normalized_price
+            if notional < self._minNotional:
+                raise InvalidOrderError(
+                    f"订单金额 {notional} 小于交易所最小下单金额 {self._minNotional}"
+                )
+
+        if quoteQuantity is not None and quoteQuantity < self._minNotional:
+            raise InvalidOrderError(
+                f"quoteOrderQty {quoteQuantity} 小于交易所最小下单金额 {self._minNotional}"
+            )
+
+        return normalized_side, normalized_quantity, normalized_price, quoteQuantity
+
     # ==================================================
     # 账户信息
     # ==================================================
@@ -333,15 +404,24 @@ class BinanceClient:
     ) -> dict[str, Any]:
         """创建合约订单"""
         client = self._ensureConnected()
+        self._assert_trading_allowed()
+        normalized_side, normalized_quantity, normalized_price, _ = self._validate_order_values(
+            side=side,
+            quantity=quantity,
+            price=price,
+        )
         params = {
             "symbol": symbol,
-            "side": side,
+            "side": normalized_side,
             "type": type,
-            "quantity": self.formatQuantity(quantity),
+            "quantity": self.formatQuantity(normalized_quantity or quantity),
             **kwargs
         }
-        if price:
-            params["price"] = self.formatPrice(price)
+        if normalized_side == "BUY" and self._rateLimiter.isInCircuitBreaker:
+            raise ApiError(code=-1003, message="Rate limiter circuit breaker active for BUY futures orders")
+
+        if normalized_price is not None:
+            params["price"] = self.formatPrice(normalized_price)
             params["timeInForce"] = "GTC"
 
         try:
@@ -373,17 +453,26 @@ class BinanceClient:
         @returns 币安返回的订单信息
         """
         client = self._ensureConnected()
+        self._assert_trading_allowed()
+        normalized_side, normalized_quantity, normalized_price, _ = self._validate_order_values(
+            side=side,
+            quantity=quantity,
+            price=price,
+        )
 
         # 消耗订单速率名额
         await self._rateLimiter.acquireOrderSlot()
         await self._rateLimiter.acquireWeight(1)
 
-        formattedPrice = self.formatPrice(price)
-        formattedQty = self.formatQuantity(quantity)
+        if normalized_side == "BUY" and self._rateLimiter.isInCircuitBreaker:
+            raise ApiError(code=-1003, message="Rate limiter circuit breaker active for BUY orders")
+
+        formattedPrice = self.formatPrice(normalized_price or price)
+        formattedQty = self.formatQuantity(normalized_quantity or quantity)
 
         logger.info(
             "📝 挂单: %s %s %s @ %s",
-            side, formattedQty, self._settings.tradingSymbol, formattedPrice,
+            normalized_side, formattedQty, self._settings.tradingSymbol, formattedPrice,
         )
 
         try:
@@ -391,7 +480,7 @@ class BinanceClient:
             clientOrderId = f"{self._orderIdPrefix}{uuid.uuid4().hex[:16]}"
             order = await client.create_order(
                 symbol=self._settings.tradingSymbol,
-                side=side,
+                side=normalized_side,
                 type="LIMIT",
                 timeInForce="GTC",
                 price=formattedPrice,
@@ -420,24 +509,38 @@ class BinanceClient:
         @returns 币安返回的订单信息
         """
         client = self._ensureConnected()
+        self._assert_trading_allowed()
+
+        normalized_side, normalized_quantity, _, normalized_quote_quantity = self._validate_order_values(
+            side=side,
+            quantity=quantity,
+            quoteQuantity=quoteQuantity,
+        )
 
         await self._rateLimiter.acquireOrderSlot()
         await self._rateLimiter.acquireWeight(1)
 
         params: dict[str, Any] = {
             "symbol": self._settings.tradingSymbol,
-            "side": side,
+            "side": normalized_side,
             "type": "MARKET",
         }
 
-        if quantity is not None:
-            params["quantity"] = self.formatQuantity(quantity)
-        elif quoteQuantity is not None:
-            params["quoteOrderQty"] = str(quoteQuantity)
+        if normalized_quantity is not None:
+            params["quantity"] = self.formatQuantity(normalized_quantity)
+        elif normalized_quote_quantity is not None:
+            params["quoteOrderQty"] = str(normalized_quote_quantity)
         else:
             raise InvalidOrderError("市价单必须指定 quantity 或 quoteQuantity")
 
-        logger.info("⚡ 市价单: %s %s", side, params.get("quantity") or params.get("quoteOrderQty"))
+        if normalized_side == "BUY" and self._rateLimiter.isInCircuitBreaker:
+            raise ApiError(code=-1003, message="Rate limiter circuit breaker active for BUY orders")
+
+        logger.info(
+            "⚡ 市价单: %s %s",
+            normalized_side,
+            params.get("quantity") or params.get("quoteOrderQty"),
+        )
 
         try:
             order = await client.create_order(**params)
@@ -636,12 +739,13 @@ class BinanceClient:
         # 检查缓存
         if cacheKey in self._klinesCache:
             cachedTime, cachedData = self._klinesCache[cacheKey]
-            if now - cachedTime < 60:
+            if now - cachedTime < self._klineCacheTTL:
                 logger.debug("✅ K 线缓存命中: %s (%.0f秒前)", cacheKey, now - cachedTime)
                 return cachedData
 
         client = self._ensureConnected()
         try:
+            await self._rateLimiter.acquireWeight(1)
             klines = await client.get_klines(
                 symbol=target_symbol,
                 interval=interval,
@@ -666,6 +770,7 @@ class BinanceClient:
         target_symbol = symbol or self._settings.tradingSymbol
         client = self._ensureConnected()
         try:
+            await self._rateLimiter.acquireWeight(1)
             ticker = await client.get_symbol_ticker(symbol=target_symbol)
             return Decimal(ticker["price"])
         except BinanceAPIException as e:
@@ -705,6 +810,7 @@ class BinanceClient:
         if currentPrice == 0:
             try:
                 client = self._ensureConnected()
+                await self._rateLimiter.acquireWeight(1)
                 ticker = await client.get_symbol_ticker(symbol=self._settings.tradingSymbol)
                 currentPrice = Decimal(ticker["price"])
             except Exception:

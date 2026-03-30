@@ -5,14 +5,17 @@
 超出限制时自动等待令牌补充，而非直接拒绝请求。
 """
 import asyncio
-import time
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
+
+from src.utils.error_handler import ApiError
 
 logger = logging.getLogger(__name__)
 
 # NOTE: 双阶段权重保护阈值
-WARNING_THRESHOLD = 0.80    # 80% 以上进入警戒区，非紧急操作 sleep 500ms
+WARNING_THRESHOLD = 0.80  # 80% 以上进入警戒区，非紧急操作 sleep 500ms
 CIRCUIT_BREAKER_THRESHOLD = 0.95  # 95% 以上进入熔断区，停止非卖单请求
 
 
@@ -32,6 +35,11 @@ class TokenBucket:
     _lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
 
     def __post_init__(self) -> None:
+        if self.capacity <= 0:
+            raise ValueError("TokenBucket capacity must be greater than 0")
+        if self.refillRate <= 0:
+            raise ValueError("TokenBucket refillRate must be greater than 0")
+
         self._tokens = self.capacity
         self._lastRefill = time.monotonic()
 
@@ -48,24 +56,27 @@ class TokenBucket:
 
         @param cost 本次请求消耗的令牌数（对应 API 权重）
         """
-        async with self._lock:
-            self._refill()
+        if cost <= 0:
+            return
 
-            if self._tokens >= cost:
-                self._tokens -= cost
-                return
+        while True:
+            async with self._lock:
+                self._refill()
 
-            # NOTE: 计算需要等待的时间，让令牌补充到足够
-            deficit = cost - self._tokens
-            waitTime = deficit / self.refillRate
-            logger.warning(
-                "⏳ 速率限制：令牌不足 (需要 %.1f, 剩余 %.1f)，等待 %.2f 秒",
-                cost, self._tokens, waitTime,
-            )
-            await asyncio.sleep(waitTime)
+                if self._tokens >= cost:
+                    self._tokens -= cost
+                    return
 
-            self._refill()
-            self._tokens -= cost
+                deficit = cost - self._tokens
+                wait_time = deficit / self.refillRate
+                logger.warning(
+                    "⏳ 速率限制：令牌不足 (需要 %.1f, 剩余 %.1f)，等待 %.2f 秒",
+                    cost,
+                    self._tokens,
+                    wait_time,
+                )
+
+            await asyncio.sleep(wait_time)
 
     @property
     def currentUsageRatio(self) -> float:
@@ -80,10 +91,12 @@ class TokenBucket:
 
         @param usedWeight 当前分钟已消耗的权重值
         """
-        remaining = self.capacity - usedWeight
-        if remaining >= 0:
-            self._tokens = min(self._tokens, remaining)
-            logger.debug("🔄 校准令牌桶: 已用权重=%d, 剩余令牌=%.1f", usedWeight, self._tokens)
+        if usedWeight < 0:
+            return
+
+        remaining = max(0.0, self.capacity - usedWeight)
+        self._tokens = min(self._tokens, remaining)
+        logger.debug("🔄 校准令牌桶: 已用权重=%d, 剩余令牌=%.1f", usedWeight, self._tokens)
 
 
 class RateLimiter:
@@ -96,8 +109,8 @@ class RateLimiter:
     """
 
     # NOTE: 使用保守值，给其他可能的 API 消耗留出缓冲
-    DEFAULT_WEIGHT_CAPACITY = 5000   # 官方限制 6,000/分钟
-    DEFAULT_ORDER_CAPACITY = 80      # 官方限制 100/10秒
+    DEFAULT_WEIGHT_CAPACITY = 5000  # 官方限制 6,000/分钟
+    DEFAULT_ORDER_CAPACITY = 80  # 官方限制 100/10秒
 
     def __init__(
         self,
@@ -120,10 +133,11 @@ class RateLimiter:
 
         logger.info(
             "🚦 速率限制器初始化: 权重=%d/分钟, 订单=%d/10秒",
-            weightCapacity, orderCapacity,
+            weightCapacity,
+            orderCapacity,
         )
 
-    def triggerHardCircuitBreaker(self, duration: int = 60):
+    def triggerHardCircuitBreaker(self, duration: int = 60) -> None:
         """
         触发硬熔断，由外部 (如 BinanceClient 捕获 429) 调用。
         @param duration 熔断持续时间 (秒)，默认 60 秒
@@ -136,10 +150,10 @@ class RateLimiter:
         """检查当前是否处于硬熔断期内"""
         if self._hardCircuitBreakerUntil == 0:
             return False
-        
+
         if time.time() < self._hardCircuitBreakerUntil:
             return True
-        
+
         # 熔断时间已过，自动恢复
         self._hardCircuitBreakerUntil = 0
         logger.info("🟢 [RateLimiter] 硬熔断冷却结束，系统尝试恢复运行")
@@ -154,7 +168,7 @@ class RateLimiter:
         if self.isHardCircuitBroken:
             # 如果处于硬熔断期，直接抛出频率限制异常，强制外部重试器检测到并进行长等待
             raise ApiError(code=-1003, message="Rate limit exceeded (Hard Circuit Breaker active)")
-            
+
         await self.weightBucket.acquire(weight)
 
     async def acquireOrderSlot(self) -> None:
@@ -187,7 +201,7 @@ class RateLimiter:
     def isInCircuitBreaker(self) -> bool:
         """权重使用率 >= 95%，进入熔断区，停止所有非卖单/非止损请求"""
         ratio = self.getUsageRatio()
-        return ratio >= CIRCUIT_BREAKER_THRESHOLD
+        return ratio >= CIRCUIT_BREAKER_THRESHOLD or self.isHardCircuitBroken
 
     async def acquireWeightWithProtection(self, weight: int = 1) -> str:
         """
@@ -198,19 +212,49 @@ class RateLimiter:
         """
         ratio = self.getUsageRatio()
 
-        if ratio >= CIRCUIT_BREAKER_THRESHOLD:
+        if ratio >= CIRCUIT_BREAKER_THRESHOLD or self.isHardCircuitBroken:
             logger.critical(
-                "\ud83d\udea8 权重熔断! 使用率 %.1f%% >= %.0f%%，拒绝非紧急请求",
-                ratio * 100, CIRCUIT_BREAKER_THRESHOLD * 100,
+                "🚨 权重熔断! 使用率 %.1f%% >= %.0f%%，拒绝非紧急请求",
+                ratio * 100,
+                CIRCUIT_BREAKER_THRESHOLD * 100,
             )
             return "circuit_breaker"
 
         if ratio >= WARNING_THRESHOLD:
             logger.warning(
-                "\u26a0\ufe0f 权重警戒! 使用率 %.1f%% >= %.0f%%，进入冷静模式 (+500ms)",
-                ratio * 100, WARNING_THRESHOLD * 100,
+                "⚠️ 权重警戒! 使用率 %.1f%% >= %.0f%%，进入冷静模式 (+500ms)",
+                ratio * 100,
+                WARNING_THRESHOLD * 100,
             )
             await asyncio.sleep(0.5)
 
-        await self.weightBucket.acquire(weight)
+        await self.acquireWeight(weight)
         return "warning" if ratio >= WARNING_THRESHOLD else "ok"
+
+
+_SHARED_LIMITERS: dict[str, RateLimiter] = {}
+_SHARED_LIMITERS_LOCK = threading.Lock()
+
+
+def get_shared_rate_limiter(
+    scope: str,
+    *,
+    weightCapacity: int = RateLimiter.DEFAULT_WEIGHT_CAPACITY,
+    orderCapacity: int = RateLimiter.DEFAULT_ORDER_CAPACITY,
+) -> RateLimiter:
+    """
+    为同一作用域返回共享的 RateLimiter。
+    推荐按 API Key / 账户维度共享，以避免单 Bot 独立限流导致全局超限。
+    """
+    normalized_scope = scope.strip() or "default"
+
+    with _SHARED_LIMITERS_LOCK:
+        limiter = _SHARED_LIMITERS.get(normalized_scope)
+        if limiter is None:
+            limiter = RateLimiter(
+                weightCapacity=weightCapacity,
+                orderCapacity=orderCapacity,
+            )
+            _SHARED_LIMITERS[normalized_scope] = limiter
+            logger.info("🧩 已创建共享速率限制器: %s", normalized_scope)
+        return limiter

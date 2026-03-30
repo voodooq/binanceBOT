@@ -56,7 +56,7 @@ async def run_backtest(
     if not strategy_class:
         raise HTTPException(status_code=400, detail=f"不支持类型 [{bot.strategy_type}] 的回测")
 
-    # 3. 抓取历史数据
+    # 3. 抓取历史数据 (依赖环境变量或默认 Session 处理代理)
     from binance import AsyncClient
     binance_async = await AsyncClient.create()
     

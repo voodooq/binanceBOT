@@ -129,10 +129,11 @@ class GridStrategy(BaseStrategy):
     
     def __init__(self, bot_config: BotConfig, client: BinanceClient):
         super().__init__(bot_config, client)
-        
+
         # NOTE: 实例化 V3 V2 的兼容配置代理
-        p = bot_config.parameters
-        def to_decimal(val, default="0"):
+        p = bot_config.parameters if isinstance(bot_config.parameters, dict) else {}
+
+        def to_decimal(val: Any, default: str = "0") -> Decimal:
             if val is None or str(val).strip() == "":
                 return Decimal(default)
             try:
@@ -161,9 +162,10 @@ class GridStrategy(BaseStrategy):
             maxDrawdown=to_decimal(p.get("max_drawdown", "0.2")),
         )
 
-        from src.utils.notifier import Notifier # 临时提供 None，或者你可以从某个上下文获取
-        self._notifier = Notifier() # 如果不需要发送，直接 mock 掉
-        
+        from src.utils.notifier import Notifier
+
+        self._notifier = Notifier()
+
         # 网格价位列表（从低到高）
         self._gridPrices: list[Decimal] = []
         # 挂单池：price (Decimal) -> GridOrder
@@ -188,15 +190,60 @@ class GridStrategy(BaseStrategy):
         self._analysisTask: asyncio.Task | None = None
 
         # --- 安全层 ---
-        self._martinLevel: int = 0           # 当前连续马丁加仓层数
-        self._initialEquity: Decimal | None = None  # 初始账户净值（用于回撤计算）
+        self._martinLevel: int = 0
+        self._initialEquity: Decimal | None = None
 
         # --- ⏳ 交易冷却锁 ---
         self._lastTradeTime: float = 0.0
         self._cooldownSeconds: float = self._settings.tradeCooldown
 
+        # --- 后台任务与节流 ---
+        self._background_tasks: set[asyncio.Task] = set()
+        self._lastPricePublishTime: float = 0.0
+        self._pricePublishInterval: float = 0.5
+
         # --- RateLimiter 引用（通过 client 间接访问） ---
         self._rateLimiter = client._rateLimiter
+
+    def _queue_background_task(self, coro: Any) -> None:
+        if getattr(self._client, "is_mock", False):
+            return
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _publish_price_update(self, price: Decimal) -> None:
+        now = time.time()
+        if now - self._lastPricePublishTime < self._pricePublishInterval:
+            return
+        self._lastPricePublishTime = now
+        self._queue_background_task(
+            redis_bus.publish_trade_event(
+                user_id=self.bot_config.user_id,
+                bot_id=self.bot_config.id,
+                event_type="PRICE_UPDATE",
+                data={
+                    "symbol": self._settings.tradingSymbol,
+                    "price": float(price),
+                },
+            )
+        )
+
+    def _get_min_notional(self) -> Decimal:
+        value = getattr(
+            self._client,
+            "minNotional",
+            getattr(self._client, "_minNotional", Decimal("10")),
+        )
+        return Decimal(str(value))
+
+    @staticmethod
+    def _event_decimal(event: dict[str, Any], *keys: str, default: str = "0") -> Decimal:
+        for key in keys:
+            value = event.get(key)
+            if value not in (None, ""):
+                return Decimal(str(value))
+        return Decimal(default)
 
     # ==================================================
     # 初始化
@@ -212,6 +259,11 @@ class GridStrategy(BaseStrategy):
         lower = self._settings.gridLowerPrice
         upper = self._settings.gridUpperPrice
         count = self._settings.gridCount
+
+        if count <= 0:
+            raise ValueError("grid_count 必须大于 0")
+        if upper <= lower:
+            raise ValueError("grid_upper_price 必须大于 grid_lower_price")
 
         # 等差步长
         step = (upper - lower) / count
@@ -295,16 +347,8 @@ class GridStrategy(BaseStrategy):
 
         self._lastPrice = price
 
-        # [P3] 实时价格广播：同步至前端监控水位线
-        asyncio.create_task(redis_bus.publish_trade_event(
-            user_id=self.bot_config.user_id,
-            bot_id=self.bot_config.id,
-            event_type="PRICE_UPDATE",
-            data={
-                "symbol": self._settings.tradingSymbol,
-                "price": float(price)
-            }
-        ))
+        # [P3] 实时价格广播：同步至前端监控水位线（加入节流，避免高频任务堆积）
+        self._publish_price_update(price)
 
         # --- 风控检查 ---
         if await self._checkStopLoss(price):
@@ -316,7 +360,10 @@ class GridStrategy(BaseStrategy):
 
         # --- 自适应暂停检查 ---
         if self._currentAdjustment and self._currentAdjustment.shouldPause:
-            logger.debug("⚠️ 自适应暂停中 (%s)，跳过新建仓", self._currentAdjustment.state.value)
+            if getattr(self._client, "is_mock", False):
+                logger.info("⏸️ [Backtest] 策略处于自适应暂停状态 (%s)，跳过建仓逻辑", self._currentAdjustment.state.value)
+            else:
+                logger.debug("⚠️ 自适应暂停中 (%s)，跳过新建仓", self._currentAdjustment.state.value)
             return
 
         # --- 数据超时保护 ---
@@ -371,7 +418,7 @@ class GridStrategy(BaseStrategy):
         try:
             currentPrice = await self._client.getCurrentPrice()
             estimated_value = sell_qty_dec * currentPrice
-            minNotional = self._client._minNotional
+            minNotional = self._get_min_notional()
             if estimated_value < minNotional:
                 error_msg = f"可抛资产 ({sell_qty_dec} @ {currentPrice}) 总价值约 {estimated_value:.2f} USDT，未能满足交易所要求的系统下限 ({minNotional} USDT)。强制抛售已中止，请人工接管。"
                 logger.error("🚫 [一键平仓] %s", error_msg)
@@ -412,15 +459,26 @@ class GridStrategy(BaseStrategy):
                 # 修复: 如果关闭了自适应模式，_currentAdjustment 永远不会被 _analysisLoop 设置。
                 # 此时应该注入一个默认的静态 Adjustment 让网格计算能够走下去
                 self._currentAdjustment = GridAdjustment(
-                    state=MarketState.NORMAL,
+                    state=MarketState.LOW_VOL_RANGE,
                     gridCenterShift=Decimal("0"),
                     densityMultiplier=Decimal("1"),
                     investmentMultiplier=Decimal("1"),
                     shouldPause=False
                 )
             else:
-                logger.info("🛡️ [诊断] 自适应分析未完成，暂缓挂单")
-                return
+                # v2.3 改进: 如果此时还没有分析结果（例如回测冷启动），
+                # 尝试立即从 analyzer 获取一次初始判断，而不是直接返回
+                logger.debug("🛡️ [诊断] 自适应分析未完成，强制执行初始分析")
+                try:
+                    # 尝试拉取最近 50 根进行首次分析以解冻
+                    klinesBig = await self._client.get_klines(limit=50)
+                    if klinesBig:
+                        self._currentAdjustment = self._analyzer.analyze(klinesBig)
+                    else:
+                        return
+                except Exception as e:
+                    logger.error("首次强制分析失败: %s", e)
+                    return
 
         # 计算当前动态步长
         baseStep = (self._settings.gridUpperPrice - self._settings.gridLowerPrice) / Decimal(str(self._settings.gridCount))
@@ -444,7 +502,8 @@ class GridStrategy(BaseStrategy):
                     virtualIdx = int((checkPrice - self._settings.gridLowerPrice) / dynamicStep) if dynamicStep > 0 else 0
                     # 对于初始化卖单区，相当于假装以 checkPrice - step 买入，这里将调用一个独立的逻辑来进行现货高频核算卖单
                     await self._placeInitialSellOrder(virtualIdx, checkPrice, dynamicStep)
-                    await asyncio.sleep(0.15)
+                    if not getattr(self._client, "is_mock", False):
+                        await asyncio.sleep(0.15)
                     
             # --- 买入盘区 (当前价格以下) ---
             elif checkPrice < currentPrice:
@@ -460,7 +519,8 @@ class GridStrategy(BaseStrategy):
                     # 简单估算索引
                     virtualIdx = int((checkPrice - self._settings.gridLowerPrice) / dynamicStep) if dynamicStep > 0 else 0
                     await self._placeBuyOrder(virtualIdx, checkPrice)
-                    await asyncio.sleep(0.15)  # 阶梯式挂单延迟，避开 Binance 10秒/50单 的红线 (Err -1015)
+                    if not getattr(self._client, "is_mock", False):
+                        await asyncio.sleep(0.15)  # 阶梯式挂单延迟，避开 Binance 10秒/50单 的红线 (Err -1015)
 
             checkPrice += dynamicStep
             if dynamicStep <= 0: break
@@ -550,7 +610,7 @@ class GridStrategy(BaseStrategy):
             # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
             # 币安要求单笔订单金额必须大于 minNotional (通常测试网是 5或10，主网是 10或5)
             # 如果计算出的投资额不够，强制上调 quantity 凑够最低消费限制，防止 -1013 错误
-            minNotional = self._client._minNotional
+            minNotional = self._get_min_notional()
             if (quantity * price) < minNotional:
                 logger.debug("⚠️ 买单金额 (%.2f) 小于最低要求 (%s)，自动补足数量", float(quantity * price), float(minNotional))
                 # 补足最低金额，并额外加上 1% 缓冲防止因为价格在挂单瞬间微跌导致四舍五入后又不够了
@@ -636,7 +696,7 @@ class GridStrategy(BaseStrategy):
                 return
                 
             # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
-            minNotional = self._client._minNotional
+            minNotional = self._get_min_notional()
             if (quantity * sellPrice) < minNotional:
                 if freeBase >= (minNotional * Decimal("1.01") / sellPrice):
                     quantity = (minNotional * Decimal("1.01")) / sellPrice
@@ -687,6 +747,11 @@ class GridStrategy(BaseStrategy):
         针对当前价格以上的卖盘区网格，预先通过市价单买入所需的 Base Asset，
         确保系统启动后可以直接挂出完整的卖单墙。
         """
+        lock_key = "bootstrapping"
+        if lock_key in self._creation_locks:
+            return
+        self._creation_locks.add(lock_key)
+
         logger.info("🚀 [Bootstrapping] 启动底仓自动构建程序...")
         
         baseAsset = self._settings.tradingSymbol.replace("USDT", "")
@@ -805,10 +870,11 @@ class GridStrategy(BaseStrategy):
             return
 
         matchedGrid.status = OrderStatus.FILLED
-        filledPrice = Decimal(event.get("L", "0"))  # 最后成交价
-        filledQty = Decimal(event.get("z", "0"))     # 累计成交数量
-        feeAmt = Decimal(event.get("n", "0"))        # 手续费
-        feeAsset = event.get("N", "")               # 手续费币种
+        filledPrice = self._event_decimal(event, "L", "p")  # 最后成交价 / 回测成交价
+        filledQty = self._event_decimal(event, "z", "q")  # 累计成交数量 / 回测成交量
+        feeAmt = self._event_decimal(event, "n", "commission")  # 手续费
+        feeAsset = event.get("N") or event.get("commissionAsset", "")  # 手续费币种
+        profit = Decimal("0")
 
         # [P3] 实时通知推送：成交通知
         notification_service.send_notification(
@@ -838,7 +904,7 @@ class GridStrategy(BaseStrategy):
 
         elif side == "SELL":
             # V2.3: 直接使用卖单记录的 entryPrice 计算利润
-            if matchedGrid.entryPrice:
+            if matchedGrid.entryPrice is not None:
                 profit = (filledPrice - matchedGrid.entryPrice) * filledQty
                 self._realizedProfit += profit
 
@@ -872,45 +938,51 @@ class GridStrategy(BaseStrategy):
                     )
                 except Exception as e:
                     logger.warning("推送 Redis 利润事件失败: %s", e)
+            else:
+                logger.warning("卖单成交缺少 entryPrice，无法精确计算利润: orderId=%s", orderId)
 
-                # 清除已完成的网格订单，允许重新挂单
+            # 清除已完成的网格订单，允许重新挂单
+            if matchedGrid.price in self._orders:
                 del self._orders[matchedGrid.price]
-                
-                # 同步清除关联的已持仓买单节点，彻底释放该网格
-                if matchedGrid.entryPrice and matchedGrid.entryPrice in self._orders:
-                    del self._orders[matchedGrid.entryPrice]
+
+            # 同步清除关联的已持仓买单节点，彻底释放该网格
+            if matchedGrid.entryPrice is not None and matchedGrid.entryPrice in self._orders:
+                del self._orders[matchedGrid.entryPrice]
 
         # V3 新增: 原子的短生命周期 DB 事务以落库记录此笔完整成交
-        try:
-            from src.models.trade import Trade, OrderSide as DBOrderSide, OrderStatus as DBOrderStatus
-            from sqlalchemy import update
-            async with AsyncSessionLocal() as session:
-                # 1. 记录成交明细
-                new_trade = Trade(
-                    bot_config_id=self.bot_config.id,
-                    exchange_order_id=str(orderId) if orderId is not None else "local",
-                    symbol=self._settings.tradingSymbol,
-                    side=DBOrderSide.BUY if side == "BUY" else DBOrderSide.SELL,
-                    price=filledPrice,
-                    quantity=filledQty,
-                    executed_qty=filledQty,
-                    status=DBOrderStatus.FILLED,
-                    fee=feeAmt,
-                    fee_asset=feeAsset
-                )
-                session.add(new_trade)
-                
-                # 2. 如果是卖单成交，同步更新 BotConfig 的 cumulative PnL
-                if side == "SELL":
-                    await session.execute(
-                        update(BotConfig)
-                        .where(BotConfig.id == self.bot_config.id)
-                        .values(total_pnl=self._realizedProfit)
+        # 回测 (bot_config.id=0) 或 mock 客户端跳过落库
+        if self.bot_config.id != 0 and not getattr(self._client, "is_mock", False):
+            try:
+                from src.models.trade import Trade, OrderSide as DBOrderSide, OrderStatus as DBOrderStatus
+                from sqlalchemy import update
+                async with AsyncSessionLocal() as session:
+                    # 1. 记录成交明细
+                    new_trade = Trade(
+                        bot_config_id=self.bot_config.id,
+                        exchange_order_id=str(orderId) if orderId is not None else "local",
+                        symbol=self._settings.tradingSymbol,
+                        side=DBOrderSide.BUY if side == "BUY" else DBOrderSide.SELL,
+                        price=filledPrice,
+                        quantity=filledQty,
+                        executed_qty=filledQty,
+                        status=DBOrderStatus.FILLED,
+                        fee=feeAmt,
+                        fee_asset=feeAsset,
+                        realized_profit=profit if side == "SELL" else Decimal("0.0")
                     )
-                
-                await session.commit()
-        except Exception as e:
-            logger.error("记录 Trade 订单 [bot=%d, orderId=%s] 及 PnL 同步失败: %s", self.bot_config.id, orderId, e)
+                    session.add(new_trade)
+                    
+                    # 2. 如果是卖单成交，同步更新 BotConfig 的 cumulative PnL
+                    if side == "SELL":
+                        await session.execute(
+                            update(BotConfig)
+                            .where(BotConfig.id == self.bot_config.id)
+                            .values(total_pnl=self._realizedProfit)
+                        )
+                    
+                    await session.commit()
+            except Exception as e:
+                logger.error("记录 Trade 订单 [bot=%d, orderId=%s] 及 PnL 同步失败: %s", self.bot_config.id, orderId, e)
 
         self._saveState()
 
@@ -942,12 +1014,13 @@ class GridStrategy(BaseStrategy):
             else:
                 sellPrice = self._gridPrices[sellGridIndex]
 
-            await asyncio.sleep(0.2)
+            if not getattr(self._client, "is_mock", False):
+                await asyncio.sleep(0.2)
 
             # --- ⏳ 交易冷却拦截器 (卖单使用排队等待) ---
             currentTime = time.time()
             timeToWait = self._cooldownSeconds - (currentTime - self._lastTradeTime)
-            if timeToWait > 0:
+            if timeToWait > 0 and not getattr(self._client, "is_mock", False):
                 await asyncio.sleep(timeToWait)
 
             # --- 🛡️ 仓位预检查 (防止手中无币却盲目触发配对卖出) ---
@@ -959,7 +1032,7 @@ class GridStrategy(BaseStrategy):
                 
             # --- 🛡️ NOTIONAL (最小下单金额) 保护 ---
             # 卖单同样需要遵守币安的最小交易额度规则
-            minNotional = self._client._minNotional
+            minNotional = self._get_min_notional()
             if (quantity * sellPrice) < minNotional:
                 logger.debug("⚠️ 打算挂卖单金额 (%.4f) 小于最低要求 (%s)", float(quantity * sellPrice), float(minNotional))
                 # 对于卖单如果当前仓位连最低卖出都达不到，补足也会因没币而被拒，因此不如跳过不挂单
@@ -1103,8 +1176,8 @@ class GridStrategy(BaseStrategy):
         except Exception as e:
             logger.warning("获取初始净值失败: %s", e)
 
-        # 启动自适应市场分析任务
-        if self._settings.adaptiveMode:
+        # 启动自适应市场分析任务 (回测模式跳过异步循环，改由引擎同步驱动)
+        if self._settings.adaptiveMode and not getattr(self._client, "is_mock", False):
             self._analysisTask = asyncio.create_task(self._analysisLoop())
             logger.info("🧠 自适应市场分析已启动 (间隔: %d秒)", self._settings.analysisInterval)
 
@@ -1119,6 +1192,13 @@ class GridStrategy(BaseStrategy):
             except asyncio.CancelledError:
                 pass
 
+        if self._background_tasks:
+            tasks = list(self._background_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._background_tasks.clear()
+
         self._saveState()
         logger.info("⏹️ 网格策略已停止")
 
@@ -1128,7 +1208,8 @@ class GridStrategy(BaseStrategy):
         采用 MTF 多周期确认：1h 大周期 + 15m 小周期。
         """
         # NOTE: 首次启动等待 10 秒让连接先稳定
-        await asyncio.sleep(10)
+        if not getattr(self._client, "is_mock", False):
+            await asyncio.sleep(10)
 
         while self._running:
             try:
@@ -1173,7 +1254,11 @@ class GridStrategy(BaseStrategy):
             except Exception as e:
                 logger.error("市场分析失败: %s", e)
 
-            await asyncio.sleep(self._settings.analysisInterval)
+            if not getattr(self._client, "is_mock", False):
+                await asyncio.sleep(self._settings.analysisInterval)
+            else:
+                # 回测模式下，循环由引擎驱动，loop 自身应当退出
+                break
 
     # ==================================================
     # 安全层
@@ -1263,6 +1348,9 @@ class GridStrategy(BaseStrategy):
 
     def _saveState(self) -> None:
         """将策略状态保存到 JSON 文件，支持重启恢复"""
+        if getattr(self._client, "is_mock", False):
+            return
+
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         # 用 Bot ID 替代单一的交易对命名
         stateFile = STATE_DIR / f"bot_{self.bot_config.id}_grid.state.json"
@@ -1290,6 +1378,11 @@ class GridStrategy(BaseStrategy):
         """
         # 用 Bot ID 替代单一的交易对命名
         stateFile = STATE_DIR / f"bot_{self.bot_config.id}_grid.state.json"
+
+        # --- [V3.0] 关键修复: 回测模式下严禁恢复持久化状态以防脏数据干扰 ---
+        if getattr(self._client, "is_mock", False):
+            logger.info("🧪 [Backtest] 检测到回测模式，跳过状态库加载以确保证明环境纯净")
+            return False
 
         if not stateFile.exists():
             return False
