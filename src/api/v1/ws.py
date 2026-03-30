@@ -1,8 +1,11 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from src.engine.ws_hub import ws_hub
-from src.core.security import decode_access_token
-from src.schemas.user import TokenPayload
+import json
 import logging
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+
+from src.core.security import decode_access_token
+from src.engine.ws_hub import ws_hub
+from src.schemas.user import TokenPayload
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +37,18 @@ async def websocket_endpoint(
     
     try:
         while True:
-            # 持续监听客户端发来的消息 (比如前端可能发心跳或指令)
-            data = await websocket.receive_text()
-            # 目前仅作为推送中心，不处理业务指令
-            pass
+            # 持续监听客户端发来的消息 (比如前端心跳)
+            raw_data = await websocket.receive_text()
+            try:
+                payload = json.loads(raw_data)
+            except json.JSONDecodeError:
+                payload = {}
+
+            if payload.get("type") == "PING":
+                await websocket.send_json({
+                    "type": "PONG",
+                    "ts": payload.get("ts"),
+                })
     except WebSocketDisconnect:
         ws_hub.disconnect(websocket, user_id=user_id)
     except Exception as e:

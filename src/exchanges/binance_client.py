@@ -95,6 +95,8 @@ class BinanceClient:
         # 资金账户快照: {asset: free_balance}
         self._balances: dict[str, Decimal] = {}
         self._lastBalanceUpdate: float = 0
+        self._lastUserDataEventTime: float = 0
+        self._userStreamCallback: Any | None = None
 
     # ==================================================
     # 生命周期管理
@@ -370,6 +372,44 @@ class BinanceClient:
                 items.append(f"{asset}: {free}")
         return ", ".join(items) if items else "无余额"
 
+    def _mark_balance_snapshot_updated(self) -> None:
+        self._lastBalanceUpdate = time.time()
+
+    def _update_balance(self, asset: str, free: Any) -> None:
+        self._balances[asset] = Decimal(str(free))
+
+    def _handle_user_stream_event(self, event: dict[str, Any]) -> None:
+        """
+        根据用户流事件增量更新本地余额镜像。
+        这样风控计算不必长期依赖初始化时的 REST 快照。
+        """
+        self._lastUserDataEventTime = time.time()
+        event_type = event.get("e") or event.get("eventType")
+        updated = False
+
+        try:
+            if event_type == "outboundAccountPosition":
+                for balance in event.get("B", []):
+                    asset = balance.get("a")
+                    free = balance.get("f")
+                    if asset is None or free is None:
+                        continue
+                    self._update_balance(asset, free)
+                    updated = True
+
+            elif event_type == "balanceUpdate":
+                asset = event.get("a")
+                delta = event.get("d")
+                if asset is not None and delta is not None:
+                    self._balances[asset] = self._balances.get(asset, Decimal("0")) + Decimal(str(delta))
+                    updated = True
+
+            if updated:
+                self._mark_balance_snapshot_updated()
+                logger.debug("🔄 用户流余额镜像已更新: %s", self._getBalancesSummary())
+        except Exception as e:
+            logger.warning("解析用户流余额事件失败: %s | event=%s", e, event)
+
     # ==================================================
     # 合约 (Futures) API 扩展
     # ==================================================
@@ -548,6 +588,56 @@ class BinanceClient:
             return order
         except BinanceAPIException as e:
             raise _toBinanceApiError(e, self._rateLimiter)
+
+    async def createOrder(
+        self,
+        symbol: str | None = None,
+        side: str = "BUY",
+        type: str = "LIMIT",
+        quantity: Any = 0,
+        price: Any = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """
+        通用下单兼容接口，供旧策略或回测对齐使用。
+        当前客户端按单一 symbol 初始化，因此不允许跨 symbol 下单。
+        """
+        target_symbol = symbol or self._settings.tradingSymbol
+        if target_symbol != self._settings.tradingSymbol:
+            raise InvalidOrderError(
+                f"当前客户端仅支持交易对 {self._settings.tradingSymbol}，不支持下单到 {target_symbol}"
+            )
+
+        order_type = str(type or "LIMIT").upper()
+        normalized_quantity = Decimal(str(quantity)) if quantity is not None else None
+        normalized_price = Decimal(str(price)) if price is not None else None
+
+        quote_quantity = kwargs.get("quoteQuantity", kwargs.get("quoteOrderQty"))
+        normalized_quote_quantity = (
+            Decimal(str(quote_quantity)) if quote_quantity is not None else None
+        )
+
+        if order_type == "MARKET":
+            return await self.createMarketOrder(
+                side=side,
+                quantity=normalized_quantity,
+                quoteQuantity=normalized_quote_quantity,
+            )
+
+        if order_type == "LIMIT":
+            if normalized_price is None:
+                raise InvalidOrderError("限价单必须指定 price")
+            if normalized_quantity is None:
+                raise InvalidOrderError("限价单必须指定 quantity")
+            return await self.createLimitOrder(
+                side=side,
+                price=normalized_price,
+                quantity=normalized_quantity,
+            )
+
+        raise InvalidOrderError(f"不支持的订单类型: {order_type}")
+
+    create_order = createOrder
 
     # ==================================================
     # 撤单操作
@@ -866,12 +956,17 @@ class BinanceClient:
         """
         启动用户数据流 WebSocket (接入 P4 聚合器模式)。
         """
-        # 我们假设这在 connect 之后调用，此时 api_key_id 等应该已经由 context 或 model 获取
-        # 注意：BinanceClient 并不总是有 api_key_id，但在 V3 中 bot_config 包含它。
-        # 我们可以通过 settings 获取
         api_key_id = getattr(self._settings, "api_key_id", 0)
-        
+
         logger.info("📡 [Aggregator-Client] 正在向聚合器订阅用户流: KeyID %s", api_key_id)
+
+        async def _callback(event: dict[str, Any]) -> None:
+            self._handle_user_stream_event(event)
+            result = onOrderUpdate(event)
+            if asyncio.iscoroutine(result):
+                await result
+
+        self._userStreamCallback = _callback
 
         try:
             await stream_aggregator.subscribe_user_data(
@@ -879,14 +974,19 @@ class BinanceClient:
                 api_key=self._settings.apiKey,
                 api_secret=self._settings.apiSecret,
                 is_testnet=self._settings.useTestnet,
-                callback=onOrderUpdate
+                callback=self._userStreamCallback,
             )
-            
+
             while True:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             logger.info("🛑 [Aggregator-Client] 正在退订用户流: KeyID %s", api_key_id)
-            await stream_aggregator.unsubscribe_user_data(api_key_id, onOrderUpdate)
+            if self._userStreamCallback is not None:
+                await stream_aggregator.unsubscribe_user_data(
+                    api_key_id,
+                    self._userStreamCallback,
+                )
+            self._userStreamCallback = None
             raise
         except Exception as e:
             logger.error("❌ 用户流桥接异常: %s", e)

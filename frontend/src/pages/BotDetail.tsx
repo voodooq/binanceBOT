@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
++import { useQuery } from "@tanstack/react-query";
 import { useParams, useNavigate } from "react-router-dom";
 import {
     ChevronLeft,
@@ -22,6 +22,9 @@ export default function BotDetail() {
     const navigate = useNavigate();
     const [isPanicking, setIsPanicking] = useState(false);
     const [deltaData, setDeltaData] = useState<any>(null);
+    const [currentPrice, setCurrentPrice] = useState<number | null>(null);
+    const [lastProfitEvent, setLastProfitEvent] = useState<any>(null);
+    const [profitEventVersion, setProfitEventVersion] = useState(0);
 
     const { data: bot, isLoading, refetch } = useQuery({
         queryKey: ["bot", id],
@@ -40,16 +43,56 @@ export default function BotDetail() {
         refetchInterval: 15000,
     });
 
-    // 处理实时推送数据 (P3 Delta 监控)
+    // 处理实时推送数据
     const handleMessage = useCallback((payload: any) => {
-        if (payload.bot_id.toString() !== id) return;
+        if (!id || payload?.bot_id?.toString() !== id) return;
 
         if (payload.type === "HEDGE_DELTA_UPDATE") {
             setDeltaData(payload.data);
+            return;
+        }
+
+        if (payload.type === "PRICE_UPDATE") {
+            setCurrentPrice(Number(payload.data?.price ?? 0));
+            return;
+        }
+
+        if (payload.type === "PROFIT_MATCHED") {
+            setLastProfitEvent(payload.data);
+            setProfitEventVersion((prev) => prev + 1);
         }
     }, [id]);
 
-    useWebSocket(handleMessage);
+    const {
+        isConnected,
+        connectionStatus,
+        lastMessageAt,
+        lastError,
+        reconnect,
+    } = useWebSocket(handleMessage);
+
+    const liveStatusText = useMemo(() => {
+        switch (connectionStatus) {
+            case "connected":
+                return "实时连接正常";
+            case "reconnecting":
+                return "连接中断，正在重连";
+            case "connecting":
+                return "正在建立实时连接";
+            case "error":
+                return "实时连接异常";
+            default:
+                return "实时连接未启动";
+        }
+    }, [connectionStatus]);
+
+    useEffect(() => {
+        if (!bot || bot.status?.toUpperCase() !== "RUNNING") {
+            setCurrentPrice(null);
+            setDeltaData(null);
+            setLastProfitEvent(null);
+        }
+    }, [bot]);
 
     const handlePanicClose = async () => {
         const confirmed = window.confirm(`🔥 🚨 极高危操作警告 🚨 🔥\n\n确定要对 ${bot?.name} (${bot?.symbol}) 立即执行【一键平仓】吗？\n该操作会强制撤销所有网格挂单并市价抛售全部 Base Asset。此操作不可逆！`);
@@ -175,6 +218,54 @@ export default function BotDetail() {
                         </div>
                     </div>
                 )}
+
+                <div className="p-6 rounded-2xl bg-card border border-border flex flex-col justify-between h-32 md:col-span-3">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                            <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
+                                <Activity className="w-3 h-3" />
+                                实时链路状态
+                            </p>
+                            <p className="mt-3 text-lg font-black">
+                                {liveStatusText}
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span
+                                className={cn(
+                                    "px-2 py-1 rounded text-[10px] font-bold uppercase",
+                                    isConnected
+                                        ? "bg-green-500/10 text-green-500"
+                                        : connectionStatus === "reconnecting"
+                                        ? "bg-amber-500/10 text-amber-500"
+                                        : "bg-red-500/10 text-red-500"
+                                )}
+                            >
+                                {connectionStatus}
+                            </span>
+                            <button
+                                onClick={reconnect}
+                                className="px-3 py-1.5 text-xs font-bold rounded-lg border border-border hover:bg-muted transition-colors"
+                            >
+                                重连
+                            </button>
+                        </div>
+                    </div>
+                    <div className="flex items-end justify-between gap-4">
+                        <div>
+                            <p className="text-[10px] text-muted-foreground uppercase font-bold">最后消息时间</p>
+                            <p className="text-sm font-mono font-bold">
+                                {lastMessageAt ? new Date(lastMessageAt).toLocaleTimeString() : "--"}
+                            </p>
+                        </div>
+                        <div className="text-right">
+                            <p className="text-[10px] text-muted-foreground uppercase font-bold">异常信息</p>
+                            <p className="text-sm font-mono font-bold text-red-500 max-w-[280px] truncate">
+                                {lastError || "无"}
+                            </p>
+                        </div>
+                    </div>
+                </div>
 
                 {/* P3: 对冲策略专属状态卡片 */}
                 {bot.strategy_type === "hedge" && (
@@ -344,7 +435,16 @@ export default function BotDetail() {
 
                 {/* 右侧实时水位监控 */}
                 <div className="lg:col-span-2 h-[600px] lg:h-auto lg:min-h-[600px] sticky top-8">
-                    <LiveGridMonitor bot={bot} />
+                    <LiveGridMonitor
+                        bot={bot}
+                        currentPrice={currentPrice}
+                        isConnected={isConnected}
+                        connectionStatus={connectionStatus}
+                        lastMessageAt={lastMessageAt}
+                        lastProfitEvent={lastProfitEvent}
+                        profitEventVersion={profitEventVersion}
+                        onReconnect={reconnect}
+                    />
                 </div>
             </div>
         </div>

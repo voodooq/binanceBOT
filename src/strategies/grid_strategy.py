@@ -8,6 +8,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 from decimal import Decimal
 from enum import Enum
@@ -205,6 +206,10 @@ class GridStrategy(BaseStrategy):
         # --- RateLimiter 引用（通过 client 间接访问） ---
         self._rateLimiter = client._rateLimiter
 
+        # --- 稳定性保护 ---
+        self._state_lock = threading.Lock()
+        self._processed_terminal_events: set[str] = set()
+
     def _queue_background_task(self, coro: Any) -> None:
         if getattr(self._client, "is_mock", False):
             return
@@ -244,6 +249,21 @@ class GridStrategy(BaseStrategy):
             if value not in (None, ""):
                 return Decimal(str(value))
         return Decimal(default)
+
+    def _build_terminal_event_key(
+        self,
+        order_id: Any,
+        status: str,
+        event: dict[str, Any],
+    ) -> str:
+        filled_qty = str(event.get("z") or event.get("q") or "0")
+        trade_marker = str(event.get("t") or event.get("T") or "")
+        return f"{order_id}:{status}:{filled_qty}:{trade_marker}"
+
+    def _remember_terminal_event(self, event_key: str) -> None:
+        if len(self._processed_terminal_events) >= 10000:
+            self._processed_terminal_events.clear()
+        self._processed_terminal_events.add(event_key)
 
     # ==================================================
     # 初始化
@@ -290,6 +310,10 @@ class GridStrategy(BaseStrategy):
         self._lastPrice = currentPrice
 
         if restored:
+            try:
+                await self._syncOrdersWithExchange()
+            except Exception as e:
+                logger.warning("恢复后首次订单对账失败: %s", e)
             logger.info("🔄 已恢复上次策略状态 (%d 个挂单)", len(self._orders))
         else:
             logger.info("🆕 全新策略启动")
@@ -845,20 +869,53 @@ class GridStrategy(BaseStrategy):
         if not matchedGrid:
             return
 
+        terminal_statuses = {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
+        filledQty = self._event_decimal(event, "z", "q")
+
+        if status in terminal_statuses:
+            event_key = self._build_terminal_event_key(orderId, status, event)
+            if event_key in self._processed_terminal_events:
+                logger.debug("🔁 忽略重复订单终态事件: %s", event_key)
+                return
+            self._remember_terminal_event(event_key)
+
         # --- 取消/过期/拒绝：清理本地状态 ---
         if status in ("CANCELED", "EXPIRED", "REJECTED"):
             logger.info(
                 "🗑️ 订单已终结 (%s): 网格 %d, orderId=%s",
                 status, matchedGrid.gridIndex, orderId,
             )
+
+            if filledQty > 0 and matchedGrid.side == GridSide.BUY:
+                filledPrice = self._event_decimal(event, "L", "p", default=str(matchedGrid.price))
+                logger.warning(
+                    "⚠️ 买单部分成交后终结，正在为已成交仓位补挂卖单: grid=%d qty=%s",
+                    matchedGrid.gridIndex,
+                    filledQty,
+                )
+                await self._placeSellOrder(
+                    gridIndex=matchedGrid.gridIndex,
+                    buyPrice=filledPrice,
+                    quantity=filledQty,
+                )
+            elif filledQty > 0 and matchedGrid.side == GridSide.SELL and matchedGrid.entryPrice is not None:
+                partial_profit = (matchedGrid.price - matchedGrid.entryPrice) * filledQty
+                self._realizedProfit += partial_profit
+                logger.warning(
+                    "⚠️ 卖单部分成交后终结，按已成交数量补记利润: grid=%d profit=%s total=%s",
+                    matchedGrid.gridIndex,
+                    partial_profit,
+                    self._realizedProfit,
+                )
+
             matchedGrid.status = OrderStatus.CANCELLED
-            del self._orders[matchedGrid.price]
+            if matchedGrid.price in self._orders:
+                del self._orders[matchedGrid.price]
             self._saveState()
             return
 
         # --- 部分成交：仅记录日志 ---
         if status == "PARTIALLY_FILLED":
-            filledQty = Decimal(event.get("z", "0"))
             logger.info(
                 "\u23f3 \u90e8\u5206\u6210\u4ea4: \u7f51\u683c %d, %s %s, \u5df2\u6210\u4ea4 %s",
                 matchedGrid.gridIndex, side, matchedGrid.price, filledQty,
@@ -871,7 +928,6 @@ class GridStrategy(BaseStrategy):
 
         matchedGrid.status = OrderStatus.FILLED
         filledPrice = self._event_decimal(event, "L", "p")  # 最后成交价 / 回测成交价
-        filledQty = self._event_decimal(event, "z", "q")  # 累计成交数量 / 回测成交量
         feeAmt = self._event_decimal(event, "n", "commission")  # 手续费
         feeAsset = event.get("N") or event.get("commissionAsset", "")  # 手续费币种
         profit = Decimal("0")
@@ -1354,6 +1410,7 @@ class GridStrategy(BaseStrategy):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         # 用 Bot ID 替代单一的交易对命名
         stateFile = STATE_DIR / f"bot_{self.bot_config.id}_grid.state.json"
+        tempFile = stateFile.with_suffix(f"{stateFile.suffix}.tmp")
 
         state = {
             "realizedProfit": str(self._realizedProfit),
@@ -1365,7 +1422,12 @@ class GridStrategy(BaseStrategy):
         }
 
         try:
-            stateFile.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+            with self._state_lock:
+                tempFile.write_text(
+                    json.dumps(state, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                tempFile.replace(stateFile)
             logger.debug("💾 策略状态已保存")
         except Exception as e:
             logger.error("状态保存失败: %s", e)

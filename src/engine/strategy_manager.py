@@ -17,6 +17,8 @@ from src.services.geo_check_service import geo_check_service
 from src.engine.proxy_scheduler import proxy_scheduler
 from src.services.notification_service import notification_service, NotificationLevel
 from src.utils.rate_limiter import get_shared_rate_limiter
+from src.db.session import AsyncSessionLocal
+from sqlalchemy import update
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,18 @@ class StrategyManager:
             return f"binance_api_key_id:{api_key_id}"
         key_suffix = (api_key_str or "")[-8:] or "unknown"
         return f"binance_api_key_suffix:{key_suffix}"
+
+    async def _set_bot_status(self, bot_id: int, status: BotStatus) -> None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(BotConfig)
+                    .where(BotConfig.id == bot_id)
+                    .values(status=status)
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("同步 Bot [%d] 数据库状态失败 -> %s", bot_id, status.value)
 
     async def start_bot(self, bot_config: BotConfig, api_key_str: str, api_secret_str: str) -> bool:
         """
@@ -109,6 +123,7 @@ class StrategyManager:
             # 2. 实例化对应策略并调用统一生命周期的钩子
             strategy_instance = strategy_class(bot_config=bot_config, client=client)
             await strategy_instance.initialize()
+            await strategy_instance.start_event_processing()
 
             # 3. 创建 asyncio.Task 守护协程，捕获运行时错误并处理
             task = asyncio.create_task(
@@ -124,12 +139,14 @@ class StrategyManager:
                 "is_auto_proxy": is_auto_proxy
             }
             logger.info("🟢 Bot [%d] 启动成功 (策略: %s, 代理: %s)", bot_id, bot_config.strategy_type.value, proxy or "DIRECT")
+            await self._set_bot_status(bot_id, BotStatus.RUNNING)
             return True
 
         except Exception:
             if is_auto_proxy and proxy:
                 proxy_scheduler.release_proxy(proxy)
             logger.exception("💥 Bot [%d] 启动时发生异常", bot_id)
+            await self._set_bot_status(bot_id, BotStatus.ERROR)
             return False
 
     async def _run_bot_loop(self, bot_id: int, strategy: BaseStrategy, client: BinanceClient) -> None:
@@ -137,31 +154,38 @@ class StrategyManager:
         内部的运行大循环，负责维护各个流的健康挂载。
         这里使用 asyncio.gather 并发管理行情与订单推送流。
         """
+        final_status = BotStatus.STOPPED
+
         try:
             logger.info("📡 Bot [%d] 协程开始拉起 WebSocket 监听...", bot_id)
-            # 在单独的任务中挂载 WebSocket 流，若抛出异常则被 catch 住。
+            # 使用 BaseStrategy 的串行事件队列入口，避免行情/订单并发重入
             await asyncio.gather(
-                client.startTradeStream(onPrice=strategy.on_price_update),
-                client.startUserDataStream(onOrderUpdate=strategy.on_order_update)
+                client.startTradeStream(onPrice=strategy.handle_price_update),
+                client.startUserDataStream(onOrderUpdate=strategy.handle_order_update)
             )
         except asyncio.CancelledError:
             logger.info("🛑 Bot [%d] 的执行任务已收到取消指令，准备清理并退出...", bot_id)
             raise
         except Exception as e:
+            final_status = BotStatus.ERROR
             logger.error("💥 Bot [%d] 运行时奔溃: %s", bot_id, e)
-            # Todo: 此处可触发数据库状态回写 BotStatus.ERROR
         finally:
             logger.info("🧹 Bot [%d] 执行清理程序...", bot_id)
             try:
                 await strategy.stop()
             except Exception as e:
                 logger.error("Bot [%d] stop 钩子异常: %s", bot_id, e)
-                
+
+            try:
+                await strategy.shutdown_event_processing()
+            except Exception as e:
+                logger.error("Bot [%d] event processor 释放异常: %s", bot_id, e)
+
             try:
                 await client.disconnect()
             except Exception as e:
                 logger.error("Bot [%d] client 释放异常: %s", bot_id, e)
-            
+
             # 从管理器卸载本任务
             if bot_id in self._active_bots:
                 bot_info = self._active_bots.pop(bot_id, None)
@@ -169,6 +193,8 @@ class StrategyManager:
                 if bot_info and bot_info.get("is_auto_proxy"):
                     proxy_scheduler.release_proxy(bot_info.get("proxy"))
                 logger.info("🗑️ Bot [%d] 的运行态数据已彻底从系统擦除", bot_id)
+
+            await self._set_bot_status(bot_id, final_status)
 
     async def stop_bot(self, bot_id: int) -> bool:
         """
@@ -181,6 +207,7 @@ class StrategyManager:
             return False
 
         logger.info("⏳ 正在请求停止 Bot [%d]...", bot_id)
+        await self._set_bot_status(bot_id, BotStatus.STOPPING)
         task: asyncio.Task = bot_info["task"]
         task.cancel()
         
