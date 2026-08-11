@@ -1,45 +1,81 @@
 #!/bin/bash
 
 # ==============================================================================
-# Binance Grid Bot - Ubuntu/Linux Startup Script
+# BinanceBot V3 - Local Development Startup Script
 # ==============================================================================
 
 export PYTHONIOENCODING=utf-8
 
-echo "[1/3] Checking environment..."
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$PROJECT_ROOT"
 
-# 检查 .env 配置文件
+FRONTEND_PID=""
+
+cleanup() {
+    if [ -n "$FRONTEND_PID" ] && kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+        kill "$FRONTEND_PID" >/dev/null 2>&1 || true
+    fi
+}
+
+trap cleanup EXIT
+
+echo "[1/5] Checking environment..."
+
 if [ ! -f ".env" ]; then
     echo "[ERROR] .env file not found!"
-    echo "Please copy .env.example to .env and fill in your API keys."
+    echo "Please copy .env.example to .env and fill in the required values."
     exit 1
 fi
 
-# 检查 Python 命令 (优先使用 python3)
-if command -v python3 &>/dev/null; then
+if command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD="python3"
-elif command -v python &>/dev/null; then
+elif command -v python >/dev/null 2>&1; then
     PYTHON_CMD="python"
 else
     echo "[ERROR] Python 3 not found. Please install Python 3."
     exit 1
 fi
 
-echo "[2/3] Found Python executable: $($PYTHON_CMD --version)"
+echo "[2/5] Found Python executable: $($PYTHON_CMD --version)"
 
-echo "[3/3] Starting bot..."
+echo "[3/5] Running database migrations..."
+if ! $PYTHON_CMD -m alembic upgrade head; then
+    echo "[ERROR] Alembic migration failed."
+    echo "        Please confirm PostgreSQL/Redis are available and .env is configured correctly."
+    exit 1
+fi
+
+echo "[4/5] Starting frontend dev server..."
+if [ ! -d "frontend/node_modules" ]; then
+    echo "[WARNING] frontend/node_modules not found."
+    echo "          Please run: cd frontend && npm install"
+else
+    if command -v npm >/dev/null 2>&1; then
+        (
+            cd frontend
+            npm run dev
+        ) &
+        FRONTEND_PID=$!
+    else
+        echo "[WARNING] npm not found in PATH. Frontend dev server was not started."
+    fi
+fi
+
+echo "[5/5] Starting backend API..."
+echo "------------------------------------------------------------"
+echo "Frontend (Vite): http://127.0.0.1:5173"
+echo "Backend API:     http://127.0.0.1:8000"
+echo "Swagger:         http://127.0.0.1:8000/api/v1/openapi.json"
+echo "Press Ctrl+C to stop the backend server."
 echo "------------------------------------------------------------"
 
-echo "[3.1/3] Running pre-flight cleanup..."
-$PYTHON_CMD cleanup.py
-
-echo "[3.2/3] Starting bot engine..."
-$PYTHON_CMD main.py
-
+$PYTHON_CMD -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 exit_code=$?
+
 if [ $exit_code -ne 0 ]; then
     echo "------------------------------------------------------------"
-    echo "[WARNING] Bot stopped with exit code: $exit_code"
+    echo "[WARNING] Backend stopped with exit code: $exit_code"
+    exit $exit_code
 fi
 
 echo "------------------------------------------------------------"
